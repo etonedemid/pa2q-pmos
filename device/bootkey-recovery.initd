@@ -1,0 +1,23 @@
+#!/sbin/openrc-run
+description="Hold VOLUME-UP at boot to switch back to Android"
+
+depend() {
+    need dev
+    after udev udev-trigger
+    before display-manager sddm xdm dbus elogind local
+}
+
+start() {
+    ebegin "Checking for VOLUME-UP recovery hold"
+    if /usr/local/bin/bootkey-recovery; then
+        eend 0 "not held"
+    else
+        rc=$?
+        if [ "$rc" = 10 ]; then
+            ewarn "VOLUME-UP held -> switching to Android"
+            /usr/local/bin/boot-switch android
+            # boot-switch reboots; if it returns, do not continue booting pmOS
+        fi
+        eend 0
+    fi
+}

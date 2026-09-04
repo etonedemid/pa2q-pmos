@@ -1,0 +1,7 @@
+# build artifacts
+*.ko
+*.o
+loopcfg
+setloopbsz
+*.img
+*.db

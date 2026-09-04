@@ -1,0 +1,19 @@
+#!/bin/sh
+# Capture SDE/DSI/cesta state after a display failure. System stays alive even
+# when the panel is dead, so this runs over ssh right after the failure.
+D=/sys/kernel/debug/dri/0/debug
+OUT=/root/dispcap-$(date +%s).log
+{
+  echo "===== date ====="; date
+  echo "===== dmesg (display) tail ====="
+  dmesg | grep -iE "sde|dsi|cesta|scc|drm|dpu|phy|pll|gdsc|power.?collapse|timeout|panel|framedone|wr_ptr" | tail -80
+  echo "===== trigger evtlog dump ====="
+  echo dump > "$D/dump" 2>&1 || cat "$D/dump" 2>&1
+  for r in dsi0_phy_reg dsi0_ctrl_reg disp_cc_reg sde_crm_reg sde_rsc_rscc_reg scc_0_reg scc_1_reg scc_2_reg scc_3_reg; do
+    echo "===== $r ====="
+    timeout 3 cat "$D/$r" 2>&1 | head -60
+  done
+  echo "===== evtlog after dump (dmesg) ====="
+  dmesg | grep -iE "evtlog|SDE_EVT|sde_dbg" | tail -60
+} > "$OUT" 2>&1
+echo "wrote $OUT"

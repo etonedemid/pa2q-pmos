@@ -1,0 +1,84 @@
+#!/bin/sh
+# Dual-boot switcher for pa2q: rewrite the boot chain and reboot into the other OS.
+#
+# There is no bootloader menu on this device. Android and postmarketOS need
+# *different* contents in three partitions, so switching means writing all three
+# and rebooting:
+#
+#   boot        (sda26) - the kernel. Android's is 6.6.77, pmOS's is 6.6.98.
+#   vendor_boot (sda28) - the ramdisk. pmOS's carries /pmos-init; Android's is stock.
+#   dtbo        (sda36) - pmOS needs CBC removed for Wi-Fi and idle-pc removed or
+#                         msm_drm hangs at load; Android needs the stock overlay.
+#
+# Each OS keeps the images for the *other* one, because neither can read the
+# other's filesystem.
+set -u
+
+BOOT=/dev/disk/by-partlabel/boot_a
+VENDOR_BOOT=/dev/disk/by-partlabel/vendor_boot_a
+DTBO=/dev/disk/by-partlabel/dtbo_a
+DIR=/var/lib/dualboot
+
+usage() {
+	echo "usage: $(basename "$0") {android|pmos} [--no-reboot]" >&2
+	echo "  android  - stock kernel + ReSukiSU root" >&2
+	echo "  pmos     - postmarketOS on sda60" >&2
+	exit 2
+}
+
+TARGET="${1:-}"
+REBOOT=yes
+[ "${2:-}" = "--no-reboot" ] && REBOOT=no
+
+case "$TARGET" in
+android)
+	# Stock kernel, deliberately. Root on this device comes from ReSukiSU's
+	# LKM mode (a module loaded from /data/adb), not from a patched boot image -
+	# verified 2026-08-30: Android runs boot_a.img byte-for-byte and still has
+	# a u:r:ksu:s0 shell. The patched boot-ksu image bootloops this firmware.
+	KERNEL="$DIR/android/boot_a.img"
+	RAMDISK="$DIR/android/vendor_boot_a.img"
+	OVERLAY="$DIR/android/dtbo_a.img"
+	;;
+pmos)
+	KERNEL="$DIR/pmos/boot-ns-heap.img"
+	RAMDISK="$DIR/pmos/vendor_boot-current.img"
+	OVERLAY="$DIR/pmos/dtbo-noidlepc-nocbc.img"
+	;;
+*)
+	usage
+	;;
+esac
+
+[ "$(id -u)" = "0" ] || { echo "must run as root" >&2; exit 1; }
+
+# Refuse to write a half-set: a missing image would leave an unbootable mix of
+# one OS's kernel with another's ramdisk.
+for f in "$KERNEL" "$RAMDISK" "$OVERLAY"; do
+	[ -f "$f" ] || { echo "missing image: $f" >&2; exit 1; }
+done
+
+write_verify() {
+	src="$1"; dst="$2"; name="$3"
+	size=$(stat -c %s "$src")
+	printf "  %-12s %s ... " "$name" "$(basename "$src")"
+	dd if="$src" of="$dst" bs=4M conv=fsync 2>/dev/null || { echo "WRITE FAILED"; exit 1; }
+	want=$(md5sum "$src" | cut -d' ' -f1)
+	got=$(dd if="$dst" bs="$size" count=1 2>/dev/null | md5sum | cut -d' ' -f1)
+	[ "$want" = "$got" ] || { echo "VERIFY FAILED ($want != $got)"; exit 1; }
+	echo "ok"
+}
+
+echo "Switching boot chain to: $TARGET"
+write_verify "$KERNEL"  "$BOOT"        "boot"
+write_verify "$RAMDISK" "$VENDOR_BOOT" "vendor_boot"
+write_verify "$OVERLAY" "$DTBO"        "dtbo"
+sync
+
+if [ "$REBOOT" = yes ]; then
+	echo "All three verified. Rebooting into $TARGET ..."
+	sleep 1
+	reboot
+else
+	echo "All three verified. Reboot when ready."
+fi
