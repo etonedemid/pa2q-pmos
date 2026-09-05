@@ -874,10 +874,19 @@ int sde_cesta_resource_disable(u32 cesta_index)
 
 	ret = _sde_cesta_check_mode2_entry_status(cesta_index);
 	if (ret) {
-		SDE_ERROR_CESTA("mode2 entry failed ret:%d\n", ret);
-		SDE_EVT32(0x11, 0x22, 0x33);
-//		SDE_DBG_DUMP(0x0, "panic");
-		return ret;
+		/*
+		 * pa2q (S6E3HAF panel): the RSCC GDSC does not always report
+		 * power-collapse (BIT12) within the 500us poll window during a
+		 * full display-off (greeter->session handover, DPMS off). Stock
+		 * code treated that as fatal and returned, aborting the
+		 * resource-disable and wedging the pipeline so the next enable
+		 * produced a permanent black screen. The collapse still completes
+		 * in HW shortly after, so treat the timeout as non-fatal: log it
+		 * and continue the disable so the following enable can recover.
+		 */
+		SDE_ERROR_CESTA("mode2 entry status timeout ret:%d (non-fatal, continuing)\n", ret);
+		SDE_EVT32(0x11, 0x22, 0x33, ret);
+		ret = 0;
 	}
 
 	/*

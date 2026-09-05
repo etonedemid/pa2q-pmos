@@ -1,0 +1,30 @@
+commit bac11f8b5c7bc78e225423b0745a30584d9d38a7
+Author: etonedemid <3damir0n3@gmail.com>
+Date:   Fri Jun 12 21:44:38 2026 -0300
+
+    Enable SYSVIPC (ABI-safe) on ReSukiSU + SuSFS for Galaxy S25 (SM8750)
+    
+    - defconfig: CONFIG_SYSVIPC=y
+    - sched.h: fold sysvsem/sysvshm into task_struct ANDROID_KABI_RESERVE slots
+      (1 + 2 slots) instead of the mid-struct #ifdef block, so field offsets and
+      genksyms CRCs stay byte-identical to stock GKI -> prebuilt vendor modules
+      still load and the device boots (plain CONFIG_SYSVIPC=y bootloops).
+    - Apply SuSFS overlay (susfs4ksu gki-android15-6.6) -> ReSukiSU inline hooks.
+    - tools/lib/bpf: drop -Werror so resolve_btfids builds under newer clang.
+    - Add build_sysvipc.sh + SYSVIPC_BUILD.md.
+    
+    Verified booting on Galaxy S25+ (pa2q) with working SysV IPC.
+
+diff --git a/arch/arm64/configs/defconfig b/arch/arm64/configs/defconfig
+index d78e7e182..1d5f361be 100644
+--- a/arch/arm64/configs/defconfig
++++ b/arch/arm64/configs/defconfig
+@@ -33,7 +33,7 @@ CONFIG_LOCALVERSION_AUTO=y
+ CONFIG_BUILD_SALT=""
+ CONFIG_DEFAULT_INIT=""
+ CONFIG_DEFAULT_HOSTNAME="(none)"
+-# CONFIG_SYSVIPC is not set
++CONFIG_SYSVIPC=y
+ # CONFIG_POSIX_MQUEUE is not set
+ # CONFIG_WATCH_QUEUE is not set
+ CONFIG_CROSS_MEMORY_ATTACH=y

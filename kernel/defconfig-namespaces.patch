@@ -1,0 +1,38 @@
+commit 96d6e02dfa3c1cbd5d16524f4e77cf7e2873ca1b
+Author: etonedemid <3damir0n3@gmail.com>
+Date:   Sat Jun 13 16:10:35 2026 -0300
+
+    defconfig: enable PID_NS, DEVTMPFS, USER_NS for containers/chroot
+    
+    All three are ABI-safe (only guard functions, not KMI struct fields) so
+    they need no KABI work and don't break prebuilt vendor modules:
+    - CONFIG_PID_NS=y    : PID namespaces
+    - CONFIG_DEVTMPFS=y  : devtmpfs (mountable /dev in chroot: /dev/dri, input, fb)
+    - CONFIG_USER_NS=y   : unprivileged user namespaces (rootless containers, unshare -Ur)
+    
+    Builds on the existing ABI-safe SYSVIPC. Verified booting on Galaxy S25+ (pa2q).
+
+diff --git a/arch/arm64/configs/defconfig b/arch/arm64/configs/defconfig
+index 1d5f361be..8ee7de520 100644
+--- a/arch/arm64/configs/defconfig
++++ b/arch/arm64/configs/defconfig
+@@ -206,8 +206,8 @@ CONFIG_SOCK_CGROUP_DATA=y
+ CONFIG_NAMESPACES=y
+ CONFIG_UTS_NS=y
+ CONFIG_TIME_NS=y
+-# CONFIG_USER_NS is not set
+-# CONFIG_PID_NS is not set
++CONFIG_USER_NS=y
++CONFIG_PID_NS=y
+ CONFIG_NET_NS=y
+ # CONFIG_CHECKPOINT_RESTORE is not set
+ # CONFIG_SCHED_AUTOGROUP is not set
+@@ -1787,7 +1787,7 @@ CONFIG_PCI_ENDPOINT=y
+ #
+ CONFIG_AUXILIARY_BUS=y
+ # CONFIG_UEVENT_HELPER is not set
+-# CONFIG_DEVTMPFS is not set
++CONFIG_DEVTMPFS=y
+ CONFIG_STANDALONE=y
+ CONFIG_PREVENT_FIRMWARE_BUILD=y
+ 

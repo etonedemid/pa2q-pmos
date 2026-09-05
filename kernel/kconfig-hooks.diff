@@ -1,0 +1,70 @@
+diff --git a/drivers/video/Kconfig b/drivers/video/Kconfig
+index 1eb755a94..da2c6cfa9 100755
+--- a/drivers/video/Kconfig
++++ b/drivers/video/Kconfig
+@@ -61,6 +61,23 @@ config VIDEOMODE_HELPERS
+ config HDMI
+ 	bool
+ 
++config SPLASH_CONSOLE
++	bool "Kernel console on the bootloader continuous-splash framebuffer"
++	depends on ARM64
++	select FONT_SUPPORT
++	select FONT_8x16
++	select LOGO
++	select LOGO_LINUX_CLUT224
++	help
++	  Render the kernel log into the framebuffer the bootloader is already
++	  scanning out, for bring-up on devices with no accessible UART.
++
++	  The framebuffer address and panel geometry are compiled in and are
++	  specific to the Samsung Galaxy S25+ (pa2q / SM8750). Do not enable
++	  this on any other device.
++
++	  If unsure, say N.
++
+ endif # HAS_IOMEM
+ 
+ if VT
+diff --git a/drivers/video/Makefile b/drivers/video/Makefile
+index 6bbf87c1b..e5f14d786 100755
+--- a/drivers/video/Makefile
++++ b/drivers/video/Makefile
+@@ -7,6 +7,7 @@ obj-$(CONFIG_VGASTATE)            += vgastate.o
+ obj-$(CONFIG_VIDEO_CMDLINE)       += cmdline.o
+ obj-$(CONFIG_VIDEO_NOMODESET)     += nomodeset.o
+ obj-$(CONFIG_HDMI)                += hdmi.o
++obj-$(CONFIG_SPLASH_CONSOLE)      += splashcon.o
+ 
+ screen_info-y			  := screen_info_generic.o
+ screen_info-$(CONFIG_PCI)         += screen_info_pci.o
+diff --git a/drivers/watchdog/Kconfig b/drivers/watchdog/Kconfig
+index 751458959..fe233bd39 100755
+--- a/drivers/watchdog/Kconfig
++++ b/drivers/watchdog/Kconfig
+@@ -2258,3 +2258,16 @@ config KEEMBAY_WATCHDOG
+ 	  module will be called keembay_wdt.
+ 
+ endif # WATCHDOG
++config GH_WDT_TAME
++	bool "Tame the Gunyah hypervisor watchdog (bring-up)"
++	depends on ARM64 && HAVE_ARM_SMCCC
++	help
++	  Disable, and failing that periodically pet, the Gunyah hypervisor
++	  watchdog via SMCCC. Needed on devices where gh_virt_wdt.ko cannot be
++	  loaded (its probe resets the machine) but the bootloader has armed the
++	  watchdog anyway, so nothing pets it and the device resets mid-boot.
++
++	  This leaves the device with no working watchdog. Bring-up only.
++	  If unsure, say N.
++
++
+diff --git a/drivers/watchdog/Makefile b/drivers/watchdog/Makefile
+index 7eab9de31..ffeec87c6 100755
+--- a/drivers/watchdog/Makefile
++++ b/drivers/watchdog/Makefile
+@@ -235,3 +235,4 @@ obj-$(CONFIG_MENZ069_WATCHDOG) += menz69_wdt.o
+ obj-$(CONFIG_RAVE_SP_WATCHDOG) += rave-sp-wdt.o
+ obj-$(CONFIG_STPMIC1_WATCHDOG) += stpmic1_wdt.o
+ obj-$(CONFIG_SL28CPLD_WATCHDOG) += sl28cpld_wdt.o
++obj-$(CONFIG_GH_WDT_TAME)	+= gh_wdt_tame.o
