@@ -1,0 +1,56 @@
+pa2q: let the KGSL device report the display's DRM nodes (opt-in).
+
+KGSL is not a DRM device, so Turnip reports no VK_EXT_physical_device_drm and
+gamescope cannot tell its Xwayland which DRM device to render on: Xwayland
+comes up without DRI3 and GLX clients (the Steam client) fail with
+"glXChooseVisual failed". On pa2q the display is msm_drm (card0/renderD128),
+which kwin already renders through (kmsro -> zink -> this driver). With
+TU_KGSL_DRM_RENDER=/dev/dri/renderD128 (and optionally TU_KGSL_DRM_PRIMARY)
+set, report those nodes, so gamescope hands Xwayland the same path.
+Unset = unchanged behaviour.
+
+--- a/src/freedreno/vulkan/tu_knl_kgsl.cc
++++ b/src/freedreno/vulkan/tu_knl_kgsl.cc
+@@ -10,6 +10,8 @@
+ #include <stdint.h>
+ #include <sys/ioctl.h>
+ #include <sys/mman.h>
++#include <sys/stat.h>
++#include <sys/sysmacros.h>
+
+ #define __user
+ #include "ion/ion.h"
+@@ -1939,6 +1941,22 @@
+
+    instance->knl = &kgsl_knl_funcs;
+
++   {
++      const char *render = getenv("TU_KGSL_DRM_RENDER");
++      const char *primary = getenv("TU_KGSL_DRM_PRIMARY");
++      struct stat st;
++      if (render && stat(render, &st) == 0 && S_ISCHR(st.st_mode)) {
++         device->has_local = true;
++         device->local_major = major(st.st_rdev);
++         device->local_minor = minor(st.st_rdev);
++      }
++      if (primary && stat(primary, &st) == 0 && S_ISCHR(st.st_mode)) {
++         device->has_master = true;
++         device->master_major = major(st.st_rdev);
++         device->master_minor = minor(st.st_rdev);
++      }
++   }
++
+    result = tu_physical_device_init(device, instance);
+    if (result != VK_SUCCESS)
+       goto fail;
+--- a/src/freedreno/vulkan/tu_device.cc
++++ b/src/freedreno/vulkan/tu_device.cc
+@@ -314,7 +314,7 @@
+       .EXT_mutable_descriptor_type = true,
+       .EXT_nested_command_buffer = true,
+       .EXT_non_seamless_cube_map = true,
+-      .EXT_physical_device_drm = !is_kgsl(device->instance),
++      .EXT_physical_device_drm = !is_kgsl(device->instance) || device->has_local,
+       .EXT_pipeline_creation_cache_control = true,
+       .EXT_pipeline_creation_feedback = true,
+ #ifdef TU_USE_WSI_PLATFORM

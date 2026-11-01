@@ -1,0 +1,11 @@
+#!/bin/sh
+# Steam ARM lives in the Debian distrobox "steam" (glibc); run it there.
+# Host Vulkan ICD paths do not exist in the container: drop them.
+unset VK_DRIVER_FILES VK_ICD_FILENAMES
+# OpenGL (Steam UI, GL games) via zink on the container KGSL Turnip.
+export MESA_LOADER_DRIVER_OVERRIDE=${STEAM_GL_DRIVER:-zink}
+# podman bind-mounts the host's /etc/resolv.conf file; NetworkManager replaces
+# that file on every reconnect, the bind then points at a deleted inode and
+# Steam's game runtime (pressure-vessel/bwrap) cannot mount it: every Proton
+# game quits at once. Give the container its own copy, refreshed per start.
+exec distrobox enter steam -- sh -c 'sudo sh -c "umount /etc/resolv.conf 2>/dev/null; cat /run/host/etc/resolv.conf > /etc/resolv.conf"; exec steam-arm "$@"' sh "$@"

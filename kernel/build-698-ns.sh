@@ -8,7 +8,7 @@
 # and ufs_qcom is one of them: that is a device with no rootfs. So this builds
 # and then diffs CRCs against a baseline before anything gets flashed.
 set -euo pipefail
-TOOLCHAIN="${TOOLCHAIN:-$HOME/toolchains/clang-r510928}"
+TOOLCHAIN="${TOOLCHAIN:-$HOME/Desktop/Projects/phone-pmos/toolchains/clang-r510928}"
 [ -x "$TOOLCHAIN/bin/clang" ] || { echo "ERROR: need AOSP clang at $TOOLCHAIN/bin/clang"; exit 1; }
 export PATH="$TOOLCHAIN/bin:$HOME/bin:$PATH"
 KROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,9 +28,11 @@ cd "$KROOT"
 # is unavailable, so zink cannot allocate dmabuf-backed images and every WebKit
 # page fails with "couldn't allocate memory: heap=0". The qcom_dma_heaps module
 # only registers qcom,* heaps - the generic system heap is a separate option.
-./scripts/config --file "$OUT/.config" -e USER_NS -e PID_NS -e DMABUF_HEAPS_SYSTEM
+# DYNAMIC_DEBUG / FW_LOADER_DEBUG: the running kernel has them, and stock
+# vendor modules built against it may call __dynamic_pr_debug & co.
+./scripts/config --file "$OUT/.config" -e USER_NS -e PID_NS -e DMABUF_HEAPS_SYSTEM -e DYNAMIC_DEBUG -e FW_LOADER_DEBUG
 "${MK[@]}" olddefconfig >/dev/null
-for o in USER_NS PID_NS DMABUF_HEAPS_SYSTEM CFI_CLANG SHADOW_CALL_STACK KASAN_HW_TAGS SPLASH_CONSOLE; do
+for o in USER_NS PID_NS DMABUF_HEAPS_SYSTEM DYNAMIC_DEBUG CFI_CLANG SHADOW_CALL_STACK KASAN_HW_TAGS SPLASH_CONSOLE; do
   grep -qE "^CONFIG_$o=y" "$OUT/.config" || { echo "ERROR: CONFIG_$o missing"; exit 1; }
 done
 echo "config OK: namespaces + dmabuf system heap + mitigations + splashcon present"
@@ -58,6 +60,17 @@ echo "symbols compared   : $COMPARED"
 echo "galaxy KMI symbols : $(join -j 1 /tmp/kmi-syms.txt /tmp/kmi-base.txt | wc -l) of $(wc -l < /tmp/kmi-syms.txt) present"
 echo "CRC changes (all)  : $(wc -l < /tmp/kmi-alldiff.txt)"
 echo "CRC MISMATCHES     : $(wc -l < /tmp/kmi-galaxydiff.txt)"
+# Symbols the baseline exports but this build does not: a join only compares
+# what both have, so a dropped export would otherwise pass as "intact".
+awk '{print $2}' "$BASELINE" | sort -u > /tmp/kmi-base-names.txt
+awk '{print $2}' "$NEW" | sort -u > /tmp/kmi-new-names.txt
+comm -23 /tmp/kmi-base-names.txt /tmp/kmi-new-names.txt > /tmp/kmi-dropped.txt
+echo "EXPORTS DROPPED    : $(wc -l < /tmp/kmi-dropped.txt)"
+if [ -s /tmp/kmi-dropped.txt ]; then
+  head -20 /tmp/kmi-dropped.txt
+  echo "DO NOT FLASH: exports missing compared to the baseline."
+  exit 2
+fi
 if [ -s /tmp/kmi-galaxydiff.txt ]; then
   echo "--- offending symbols (first 20) ---"
   head -20 /tmp/kmi-galaxydiff.txt

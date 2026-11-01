@@ -1,0 +1,25 @@
+#!/sbin/openrc-run
+description="Confirm this pmOS boot finished (resets bootkey-recovery's boot-loop counter)"
+
+FAILS=/var/lib/dualboot/bootfails
+
+depend() {
+	# only sshd: once it is up the phone can be reached and fixed. Waiting on
+	# local/sddm let a missing sound card or display stall this past the
+	# bootkey-recovery deadline and reset a healthy phone.
+	need sshd
+}
+
+start() {
+	ebegin "Boot reached the default runlevel; confirming it in 60s"
+	# The 60s covers hangs that hit right after the desktop starts (a modeset).
+	( sleep 60; touch /run/pmos-boot-ok; echo 0 > "$FAILS"; sync ) >/dev/null 2>&1 &
+	eend 0
+}
+
+stop() {
+	# a clean shutdown/reboot also counts as a good boot
+	touch /run/pmos-boot-ok
+	echo 0 > "$FAILS"; sync
+	return 0
+}

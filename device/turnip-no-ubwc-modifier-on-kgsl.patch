@@ -1,0 +1,85 @@
+--- a/src/freedreno/vulkan/tu_formats.cc
++++ b/src/freedreno/vulkan/tu_formats.cc
+@@ -17,6 +17,7 @@
+ #include "fdl/fd6_format_table.h"
+ #include "tu_device.h"
+ #include "tu_image.h"
++#include "tu_knl.h"
+ 
+ static bool
+ tu6_format_vtx_supported(enum pipe_format format)
+@@ -123,6 +124,26 @@
+    return !vk_format_is_int(vk_format);
+ }
+ 
++/* The KGSL backend cannot round-trip a UBWC-compressed dmabuf. Buffers exported
++ * with DRM_FORMAT_MOD_QCOM_COMPRESSED fail to import again, so as soon as a
++ * client shares one with a compositor the import fails and the client is
++ * disconnected:
++ *
++ *    wlr_linux_dmabuf_v1: Failed to import DMA-BUF FD for plane 0: Invalid argument
++ *
++ * On a device where the GPU is reachable only through /dev/kgsl (no DRM node for
++ * the Adreno at all) that breaks every client using the dmabuf path - browsers
++ * in particular, which render in a separate GPU process. Advertise LINEAR only
++ * there, so the modifier negotiation settles on something that imports.
++ *
++ * The DRM/msm backend is unaffected and keeps UBWC.
++ */
++static bool
++tu_modifier_ubwc_shareable(const struct tu_physical_device *physical_device)
++{
++   return strcmp(physical_device->instance->knl->name, "kgsl") != 0;
++}
++
+ static void
+ tu_physical_device_get_format_properties(
+    struct tu_physical_device *physical_device,
+@@ -424,6 +445,7 @@
+       /* note: ubwc_possible() argument values to be ignored except for format */
+       if (pFormatProperties->formatProperties.optimalTilingFeatures &&
+           tiling_possible(format) &&
++          tu_modifier_ubwc_shareable(physical_device) &&
+           ubwc_possible(NULL, format, VK_IMAGE_TYPE_2D, 0, 0, 0,
+                         physical_device->info, VK_SAMPLE_COUNT_1_BIT, 1,
+                         false)) {
+@@ -455,6 +477,7 @@
+       /* note: ubwc_possible() argument values to be ignored except for format */
+       if (props3->optimalTilingFeatures &&
+           tiling_possible(format) &&
++          tu_modifier_ubwc_shareable(physical_device) &&
+           ubwc_possible(NULL, format, VK_IMAGE_TYPE_2D, 0, 0, 0,
+                         physical_device->info, VK_SAMPLE_COUNT_1_BIT, 1,
+                         false)) {
+@@ -520,6 +543,9 @@
+ 
+       switch (drm_info->drmFormatModifier) {
+       case DRM_FORMAT_MOD_QCOM_COMPRESSED:
++         /* not advertised on KGSL (see tu_modifier_ubwc_shareable) */
++         if (!tu_modifier_ubwc_shareable(physical_device))
++            return VK_ERROR_FORMAT_NOT_SUPPORTED;
+          /* falling back to linear/non-UBWC isn't possible with explicit modifier */
+ 
+          /* formats which don't support tiling */
+--- a/src/freedreno/vulkan/tu_image.cc
++++ b/src/freedreno/vulkan/tu_image.cc
+@@ -8,6 +8,7 @@
+  */
+ 
+ #include "tu_image.h"
++#include "tu_knl.h"
+ 
+ #include "drm-uapi/drm_fourcc.h"
+ 
+@@ -872,7 +873,10 @@
+       if (mod_info) {
+          modifier = DRM_FORMAT_MOD_LINEAR;
+          for (unsigned i = 0; i < mod_info->drmFormatModifierCount; i++) {
+-            if (mod_info->pDrmFormatModifiers[i] == DRM_FORMAT_MOD_QCOM_COMPRESSED)
++            /* KGSL cannot share UBWC dmabufs and does not advertise the
++             * modifier; never pick it from a caller's candidate list. */
++            if (mod_info->pDrmFormatModifiers[i] == DRM_FORMAT_MOD_QCOM_COMPRESSED &&
++                strcmp(device->instance->knl->name, "kgsl") != 0)
+                modifier = DRM_FORMAT_MOD_QCOM_COMPRESSED;
+          }
+       } else {

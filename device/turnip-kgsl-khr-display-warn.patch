@@ -1,0 +1,20 @@
+pa2q: on KGSL, enabling VK_KHR_display must not fail the whole instance.
+
+Upstream refuses to load the KGSL physical device as soon as an application
+merely enables VK_KHR_display (vulkaninfo enables every instance extension),
+so the instance ends up with no GPU at all. KHR_display simply cannot work on
+KGSL; warn and carry on so everything else still sees the GPU.
+
+--- a/src/freedreno/vulkan/tu_knl_kgsl.cc
++++ b/src/freedreno/vulkan/tu_knl_kgsl.cc
+@@ -1,8 +1,6 @@
+ VkResult
+ tu_knl_kgsl_load(struct tu_instance *instance, int fd)
+ {
+-   if (instance->vk.enabled_extensions.KHR_display) {
+-      return vk_errorf(instance, VK_ERROR_INITIALIZATION_FAILED,
+-                       "I can't KHR_display");
+-   }
++   if (instance->vk.enabled_extensions.KHR_display)
++      mesa_logw("kgsl: VK_KHR_display is not supported, ignoring it");
+

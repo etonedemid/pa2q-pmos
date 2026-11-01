@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+# Gamepad as mouse + keys on the Plasma desktop (autostart). Paused while
+# gamescope runs, so Steam and games get the pad untouched (no grab).
+#   left stick  pointer          right stick  scroll
+#   A / R2      left click       X / L2       right click     L3  middle click
+#   B           Escape           Y            Enter
+#   D-pad       arrow keys       L1 / R1      Shift+Tab / Tab
+#   Start       app launcher (Meta)          Select  overview (Meta+W)
+# Buttons follow the usual Android-gamepad HID order (GameSir X5 Lite); see
+# BUTTONS. Pointer speed: POINTER_SPEED (pixels/s at full tilt).
+import fcntl
+import glob
+import os
+import select
+import struct
+import time
+
+POINTER_SPEED = 1400.0
+SCROLL_SPEED = 12.0        # wheel notches/s at full tilt
+DEADZONE = 0.15
+TICK = 1 / 120
+
+EVENT = struct.Struct("llHHi")
+EV_SYN, EV_KEY, EV_REL, EV_ABS = 0, 1, 2, 3
+REL_X, REL_Y, REL_HWHEEL, REL_WHEEL = 0, 1, 6, 8
+ABS_X, ABS_Y, ABS_Z, ABS_RZ, ABS_HAT0X, ABS_HAT0Y = 0, 1, 2, 5, 0x10, 0x11
+BTN_LEFT, BTN_RIGHT, BTN_MIDDLE = 0x110, 0x111, 0x112
+KEY_ESC, KEY_TAB, KEY_ENTER, KEY_LEFTSHIFT, KEY_W, KEY_LEFTMETA = 1, 15, 28, 42, 17, 125
+KEY_UP, KEY_LEFT, KEY_RIGHT, KEY_DOWN = 103, 105, 106, 108
+
+# pad button code -> output key combo
+BUTTONS = {
+    0x130: (BTN_LEFT,),                 # A
+    0x131: (KEY_ESC,),                  # B
+    0x133: (BTN_RIGHT,),                # X
+    0x134: (KEY_ENTER,),                # Y
+    0x136: (KEY_LEFTSHIFT, KEY_TAB),    # L1
+    0x137: (KEY_TAB,),                  # R1
+    0x138: (BTN_RIGHT,),                # L2
+    0x139: (BTN_LEFT,),                 # R2
+    0x13A: (KEY_LEFTMETA, KEY_W),       # Select
+    0x13B: (KEY_LEFTMETA,),             # Start
+    0x13D: (BTN_MIDDLE,),               # L3
+}
+HAT = {(ABS_HAT0X, -1): KEY_LEFT, (ABS_HAT0X, 1): KEY_RIGHT,
+       (ABS_HAT0Y, -1): KEY_UP, (ABS_HAT0Y, 1): KEY_DOWN}
+
+UI_SET_EVBIT, UI_SET_KEYBIT, UI_SET_RELBIT, UI_DEV_CREATE = 0x40045564, 0x40045565, 0x40045566, 0x5501
+EVIOCGABS = lambda code: (2 << 30) | (24 << 16) | (ord("E") << 8) | (0x40 + code)
+
+
+def find_pad():
+    for d in glob.glob("/sys/class/input/event*"):
+        try:
+            with open(d + "/device/capabilities/key") as f:
+                words = f.read().split()
+        except OSError:
+            continue
+        # BTN_SOUTH (0x130) lives in word 4 counted from the right, bit 48
+        if len(words) >= 5 and int(words[-5], 16) >> 48 & 1:
+            try:
+                return os.open("/dev/input/" + os.path.basename(d), os.O_RDONLY | os.O_NONBLOCK)
+            except OSError:
+                pass
+    return None
+
+
+def axis_range(fd, code):
+    buf = bytearray(24)
+    fcntl.ioctl(fd, EVIOCGABS(code), buf)
+    _, mn, mx = struct.unpack("6i", buf)[:3]
+    return mn, mx
+
+
+def make_uinput():
+    fd = os.open("/dev/uinput", os.O_WRONLY | os.O_NONBLOCK)
+    for ev in (EV_KEY, EV_REL):
+        fcntl.ioctl(fd, UI_SET_EVBIT, ev)
+    keys = {k for combo in BUTTONS.values() for k in combo} | set(HAT.values())
+    for k in keys:
+        fcntl.ioctl(fd, UI_SET_KEYBIT, k)
+    for r in (REL_X, REL_Y, REL_WHEEL, REL_HWHEEL):
+        fcntl.ioctl(fd, UI_SET_RELBIT, r)
+    os.write(fd, struct.pack("80sHHHHi", b"pa2q-gamepad-desktop", 3, 1, 2, 1, 0) + b"\0" * (4 * 64 * 4))
+    fcntl.ioctl(fd, UI_DEV_CREATE)
+    return fd
+
+
+def gamescope_running():
+    for c in glob.glob("/proc/[0-9]*/comm"):
+        try:
+            with open(c) as f:
+                if f.read().startswith("gamescope"):
+                    return True
+        except OSError:
+            pass
+    return False
+
+
+def curve(v):
+    """Deadzone + quadratic response, keeps the sign. v in -1..1."""
+    if abs(v) < DEADZONE:
+        return 0.0
+    t = (abs(v) - DEADZONE) / (1 - DEADZONE)
+    return t * t * (1 if v > 0 else -1)
+
+
+def main():
+    out = make_uinput()
+    emit = lambda t, c, v: os.write(out, EVENT.pack(0, 0, t, c, v))
+    syn = lambda: emit(EV_SYN, 0, 0)
+    pad, ranges, sticks = None, {}, {}
+    frac = {REL_X: 0.0, REL_Y: 0.0, REL_WHEEL: 0.0, REL_HWHEEL: 0.0}
+    paused, next_check, last = False, 0.0, time.monotonic()
+    while True:
+        now = time.monotonic()
+        if now >= next_check:
+            next_check = now + 1.0
+            paused = gamescope_running()
+            if pad is None:
+                pad = find_pad()
+                if pad is not None:
+                    ranges = {a: axis_range(pad, a) for a in (ABS_X, ABS_Y, ABS_Z, ABS_RZ)}
+                    sticks = dict.fromkeys(ranges, 0.0)
+        if pad is None:
+            time.sleep(1.0)
+            continue
+        moving = any(curve(v) for v in sticks.values())
+        ready = select.select([pad], [], [], TICK if moving else 1.0)[0]
+        if ready:
+            try:
+                data = os.read(pad, EVENT.size * 64)
+            except OSError:            # unplugged
+                os.close(pad)
+                pad = None
+                continue
+            for o in range(0, len(data) - EVENT.size + 1, EVENT.size):
+                _, _, typ, code, val = EVENT.unpack_from(data, o)
+                if typ == EV_ABS and code in ranges:
+                    mn, mx = ranges[code]
+                    sticks[code] = (val - mn) / (mx - mn) * 2 - 1 if mx > mn else 0.0
+                elif paused:
+                    continue
+                elif typ == EV_KEY and code in BUTTONS and val in (0, 1):
+                    for k in BUTTONS[code] if val else reversed(BUTTONS[code]):
+                        emit(EV_KEY, k, val)
+                    syn()
+                elif typ == EV_ABS and code in (ABS_HAT0X, ABS_HAT0Y):
+                    for d in (-1, 1):
+                        emit(EV_KEY, HAT[(code, d)], 1 if val == d else 0)
+                    syn()
+        now = time.monotonic()
+        dt, last = min(now - last, 0.1), now
+        if paused or not moving:
+            continue
+        for rel, axis, speed in ((REL_X, ABS_X, POINTER_SPEED), (REL_Y, ABS_Y, POINTER_SPEED),
+                                 (REL_HWHEEL, ABS_Z, SCROLL_SPEED), (REL_WHEEL, ABS_RZ, -SCROLL_SPEED)):
+            frac[rel] += curve(sticks[axis]) * speed * dt
+            step = int(frac[rel])
+            if step:
+                frac[rel] -= step
+                emit(EV_REL, rel, step)
+        syn()
+
+
+if __name__ == "__main__":
+    main()

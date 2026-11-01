@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=pa2q rotate gesture
+Comment=Four-finger double tap flips landscape / reverse landscape
+Exec=/usr/local/bin/pa2q-rotate-gesture
+X-KDE-autostart-phase=2
+NoDisplay=true

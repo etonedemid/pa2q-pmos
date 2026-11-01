@@ -1,0 +1,1 @@
+/home/etonedemid/Desktop/Projects/phone-pmos/samsung-src/kernel_platform/msm-kernel/include/linux/sec_panel_notifier_v2.h

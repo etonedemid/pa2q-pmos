@@ -1,0 +1,19 @@
+#!/sbin/openrc-run
+description="Stop the SDE display driver from panicking the kernel on display errors"
+# Samsung SDE calls panic() on e.g. a cmd-mode framedone timeout, turning a
+# display glitch into a reboot. Clear panic_on_err before any compositor runs
+# (this used to be /etc/local.d/sde-no-panic.start, which ran after sddm).
+
+depend() {
+	after modules
+	before display-manager sddm
+}
+
+start() {
+	P=/sys/kernel/debug/dri/0/debug/panic
+	i=0
+	while [ ! -e $P ] && [ $i -lt 15 ]; do sleep 1; i=$((i + 1)); done
+	[ -e $P ] || { ewarn "no $P (msm_drm not loaded?)"; return 0; }
+	echo 0 > $P
+	einfo "SDE panic_on_err = $(cat $P)"
+}

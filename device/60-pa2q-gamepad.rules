@@ -1,0 +1,10 @@
+# pa2q: let the logged-in user (and the rootless Steam container, which only
+# sees the per-user ACL) open game controllers the way Steam expects, as in
+# Valve's steam-devices rules.
+# Steam Input creates a virtual pad for games through uinput.
+KERNEL=="uinput", SUBSYSTEM=="misc", OPTIONS+="static_node=uinput", TAG+="uaccess"
+# Steam/SDL talk to controllers over hidraw (any USB or Bluetooth HID
+# joystick/gamepad, e.g. GameSir X5 Lite 3537:1116).
+KERNEL=="hidraw*", ATTRS{idVendor}=="3537", TAG+="uaccess"
+KERNEL=="hidraw*", KERNELS=="*:3537:*", TAG+="uaccess"
+KERNEL=="hidraw*", ENV{ID_INPUT_JOYSTICK}=="1", TAG+="uaccess"

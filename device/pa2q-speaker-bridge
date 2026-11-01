@@ -1,0 +1,89 @@
+#!/bin/sh
+# Feed PipeWire's "Speaker" sink into the vendor agmplay.
+#
+# The native AudioReach stack (agm_server + open-source libagm/gsl/acdb) runs
+# the whole graph - TAS25xx powers up, no errors - but the speaker stays
+# silent, with the same ACDB, KVs and backend. The vendor agmplay in the
+# /opt/adroot bionic chroot is audible with the identical graph, so playback
+# goes through it: PipeWire's pipe-tunnel writes raw S16LE/48k/stereo into
+# $IN, and we hand agmplay a WAV header with an "endless" length followed by
+# that stream. When PipeWire closes the FIFO agmplay hits EOF, exits, and
+# we loop.
+#
+# ponytail: agmplay sends no TI speaker-protection params (pa2q-spkprot /
+# pa2q-agm-route do that only on the native stack), so MODULE_SP runs on ACDB
+# defaults. Keep volume moderate; port the SP setup if loud playback matters.
+set -u
+R=/opt/adroot
+IN=/run/pa2q-speaker.fifo
+OUT=$R/tmp/pa2q-speaker.fifo
+
+# $IN must exist before the user's PipeWire starts: the pipe-tunnel would try
+# to create it itself, can't in /run, and PipeWire exits at login.
+[ -p $IN ] || { rm -f $IN; mkfifo $IN; }
+chown root:audio $IN
+chmod 0660 $IN
+
+until grep -q "]:" /proc/asound/cards 2>/dev/null && mountpoint -q $R/vendor; do sleep 2; done
+
+# The vendor backend_conf.xml runs the speaker backend at 16 bit, but the
+# TAS25xx tuning blob only sets up the amps' TDM receiver for 24 bit: at 16
+# they stay at reset defaults and play nothing (it only worked after a 24-bit
+# run had configured them). Overlay a copy with the backend at 24 bit.
+BC=/opt/adroot/vendor/etc/backend_conf.xml
+if ! grep -q 'TDM-LPAIF-RX-PRIMARY" rate="48000" ch="2" bits="24"' $BC; then
+	# format must be explicit, or the open fails with -EIO
+	sed 's|\(name="TDM-LPAIF-RX-PRIMARY" rate="48000" ch="2" bits="\)16"|\124" format="PCM_FORMAT_S24_LE"|' $BC > /run/pa2q-backend_conf.xml
+	mount --bind /run/pa2q-backend_conf.xml $BC
+fi
+
+# Leftovers from a previous instance: an agmplay keeps PCM100, and a second
+# reader on $IN steals half the audio. The trap stops us leaving them behind.
+pkill -x agmplay
+pkill -f "^python3 - $IN"
+trap 'trap - TERM; kill 0' INT TERM
+[ -p $OUT ] || { rm -f $OUT; mkfifo $OUT; }
+
+# Relay $IN -> $OUT behind a 44-byte RIFF header (PCM, 2 ch, 48000 Hz, 16 bit,
+# max data length). Both FIFOs shrink to 8 KiB (~43 ms each): with the default
+# 64 KiB pipes the never-suspending sink kept them full and the speaker lagged
+# by up to ~0.7 s.
+relay() {
+	python3 - "$IN" "$OUT" <<'EOF'
+import fcntl, os, struct, sys
+F_SETPIPE_SZ = 1031
+src = os.open(sys.argv[1], os.O_RDONLY)
+dst = os.open(sys.argv[2], os.O_WRONLY)
+fcntl.fcntl(dst, F_SETPIPE_SZ, 8192)
+# The kernel refuses to shrink a pipe holding more than the new size (EBUSY):
+# PipeWire may have filled $IN before we attached. That audio is stale anyway.
+os.set_blocking(src, False)
+while True:
+    try:
+        fcntl.fcntl(src, F_SETPIPE_SZ, 8192)
+        break
+    except OSError:
+        try:
+            os.read(src, 65536)
+        except BlockingIOError:
+            pass
+os.set_blocking(src, True)
+os.write(dst, b"RIFF" + struct.pack("<I", 0xFFFFFFF7) + b"WAVEfmt " +
+         struct.pack("<IHHIIHH", 16, 1, 2, 48000, 192000, 4, 16) +
+         b"data" + struct.pack("<I", 0xFFFFFFF0))
+while True:
+    b = os.read(src, 4096)
+    if not b:
+        break
+    os.write(dst, b)
+EOF
+}
+
+while :; do
+	relay &
+	chroot $R /vendor/bin/agmplay /tmp/pa2q-speaker.fifo -D 100 -d 100 \
+		-i TDM-LPAIF-RX-PRIMARY -dkv 0xA2000001 -dppkv 0xAC000002 \
+		-skv 0xA100000E -ikv 1 >/dev/null 2>&1
+	wait
+	sleep 1
+done

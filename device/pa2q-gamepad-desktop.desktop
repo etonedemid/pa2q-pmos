@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=pa2q gamepad desktop controls
+Comment=Gamepad as mouse and keys on the Plasma desktop
+Exec=/usr/local/bin/pa2q-gamepad-desktop
+X-KDE-autostart-phase=2
+NoDisplay=true

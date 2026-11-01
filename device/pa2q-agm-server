@@ -1,0 +1,10 @@
+#!/bin/sh
+# Supervised by OpenRC. AGM parses the kernel card at init, and pmos-audio
+# brings the card up in the background, so wait for it here, inside the
+# supervised process, instead of in start_pre where it held up the whole
+# default runlevel (sshd included) for 120 s whenever the card was missing.
+until grep -q "]:" /proc/asound/cards 2>/dev/null; do sleep 2; done
+# (re)apply the speaker route once agm_server owns its bus name, so a
+# respawned server comes back routed too.
+( for i in $(seq 1 30); do sleep 1; /usr/bin/pa2q-agm-route >/dev/null 2>&1 && exit 0; done ) &
+exec /usr/bin/agm_server -s

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Gaming Mode
+Comment=Log out of Plasma into Steam (gamescope only)
+Exec=/usr/local/bin/pa2q-session-select gamescope
+Icon=steam
+Terminal=false
+Categories=Game;

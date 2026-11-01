@@ -1,0 +1,12 @@
+#!/sbin/openrc-run
+description="PipeWire Speaker sink -> vendor agmplay (see pa2q-speaker-bridge)"
+supervisor=supervise-daemon
+command=/usr/libexec/pa2q-speaker-bridge
+respawn_delay=2
+output_log=/var/log/pa2q-speaker-bridge.log
+error_log=/var/log/pa2q-speaker-bridge.log
+
+depend() {
+	after pmos-audio
+	before sddm
+}

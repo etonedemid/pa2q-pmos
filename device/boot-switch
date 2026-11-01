@@ -14,9 +14,19 @@
 # other's filesystem.
 set -u
 
-BOOT=/dev/disk/by-partlabel/boot_a
-VENDOR_BOOT=/dev/disk/by-partlabel/vendor_boot_a
-DTBO=/dev/disk/by-partlabel/dtbo_a
+# Partition by GPT name. Prefer udev's by-partlabel link, but fall back to the
+# kernel's own uevent data: bootkey-recovery runs this in early sysinit, before
+# udev has created any links.
+part() {
+	[ -b "/dev/disk/by-partlabel/$1" ] && { echo "/dev/disk/by-partlabel/$1"; return; }
+	for u in /sys/class/block/*/uevent; do
+		grep -qx "PARTNAME=$1" "$u" 2>/dev/null &&
+			{ echo "/dev/$(sed -n 's/^DEVNAME=//p' "$u")"; return; }
+	done
+}
+BOOT=$(part boot_a)
+VENDOR_BOOT=$(part vendor_boot_a)
+DTBO=$(part dtbo_a)
 DIR=/var/lib/dualboot
 
 usage() {
@@ -51,6 +61,9 @@ pmos)
 esac
 
 [ "$(id -u)" = "0" ] || { echo "must run as root" >&2; exit 1; }
+for d in "$BOOT" "$VENDOR_BOOT" "$DTBO"; do
+	[ -b "$d" ] || { echo "cannot find the boot partitions (boot_a/vendor_boot_a/dtbo_a)" >&2; exit 1; }
+done
 
 # Refuse to write a half-set: a missing image would leave an unbootable mix of
 # one OS's kernel with another's ramdisk.
@@ -79,6 +92,10 @@ if [ "$REBOOT" = yes ]; then
 	echo "All three verified. Rebooting into $TARGET ..."
 	sleep 1
 	reboot
+	# init may not act on it this early in boot (sysinit); the chain is
+	# written and synced, so force it
+	sleep 15
+	reboot -f
 else
 	echo "All three verified. Reboot when ready."
 fi

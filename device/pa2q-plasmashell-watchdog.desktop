@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=pa2q plasmashell watchdog
+Comment=Relaunch plasmashell after kwin or plasmashell crashes
+Exec=/usr/local/bin/pa2q-plasmashell-watchdog
+X-KDE-autostart-phase=2
+NoDisplay=true

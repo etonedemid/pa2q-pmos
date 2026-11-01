@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Switch to Android
+Comment=Write the Android boot chain and reboot (boot-switch android)
+Exec=pkexec /usr/local/bin/boot-switch android
+Icon=system-reboot
+Terminal=false
+Categories=System;

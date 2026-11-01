@@ -1,0 +1,8 @@
+#!/bin/sh
+# pa2q: "Reboot to Android" for Steam (non-Steam library shortcut, runs inside
+# the Steam container). The container cannot reach the host's polkit, so it
+# leaves a request in the shared home; pa2q-rotate-gesture (host, both
+# sessions) sees it and runs `pkexec boot-switch android`.
+H=$(getent passwd "$(id -u)" | cut -d: -f6)
+mkdir -p "$H/.cache" && : > "$H/.cache/pa2q-reboot-android"
+sleep 30   # keep the "game" running until the phone goes down

@@ -1,0 +1,24 @@
+#!/bin/sh
+# pa2q: run Steam ARM's gamepad UI (Big Picture) inside a fullscreen nested
+# gamescope. Straight on KDE's Xwayland the Steam client cannot name the
+# webhelper's window pixmap (Composite BadMatch -> "failed to create glx
+# pixmap"), so its window stays empty/transparent.
+# Gamescope's Vulkan must report the display's DRM nodes, otherwise its
+# Xwayland has no DRI3 and GLX fails (turnip-kgsl-report-display-drm.patch).
+# Steam's game runtime (pressure-vessel) and its CEF expect the session bus at
+# $XDG_RUNTIME_DIR/bus; dbus-run-session puts it under /tmp. Without the link
+# every Proton game quits at once ("bwrap: Can't find source path .../bus").
+b=${DBUS_SESSION_BUS_ADDRESS#unix:path=}; b=${b%%,*}
+[ -S "$b" ] && [ "$b" != "$XDG_RUNTIME_DIR/bus" ] && ln -sfn "$b" "$XDG_RUNTIME_DIR/bus"
+export VK_DRIVER_FILES=/etc/vulkan/icd.d/freedreno_kgsl_drm_icd.json
+export VK_ICD_FILENAMES=$VK_DRIVER_FILES
+export TU_KGSL_DRM_RENDER=/dev/dri/renderD128
+export TU_KGSL_DRM_PRIMARY=/dev/dri/card0
+export STEAM_ARM_DEVICE=${STEAM_ARM_DEVICE:--steamdeck}
+# Size gamescope to the panel's own 19.5:9 (3120x1440, at half resolution) for
+# both its output and the games, as DroidDeck does; without -W/-H/-w/-h it
+# runs 16:9 with black bars. Touch mode 4 = direct touch, like DroidDeck.
+W=${STEAM_GAMESCOPE_W:-1560}
+H=${STEAM_GAMESCOPE_H:-720}
+exec gamescope --backend wayland -f -e -W "$W" -H "$H" -w "$W" -h "$H" \
+	--default-touch-mode 4 -- /usr/local/bin/steam-arm --bigpicture -usepipewireaudio "$@"

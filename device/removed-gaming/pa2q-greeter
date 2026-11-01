@@ -1,0 +1,291 @@
+#!/usr/bin/env python3
+# Two-button session chooser: "SteamOS" (gamescope gaming mode) or "Plasma".
+# Run by pa2q-session before starting a session; prints the choice
+# ("gamescope" or "plasma") on stdout.
+#
+# No compositor: draws with Pillow into a KMS dumb buffer on /dev/dri/card0
+# and page-flips it. Input from every evdev device:
+#   gamepad  D-pad / left stick: move, A (south) or Start: pick
+#   touch    tap a button
+#   phone    volume up/down: move, power: pick
+#   keyboard arrows / Tab: move, Enter: pick
+# Argument: the button selected first (last choice), default "gamescope".
+import fcntl
+import glob
+import mmap
+import os
+import select
+import struct
+import sys
+import time
+
+from PIL import Image
+
+# ---- KMS (legacy API, enough for one plane on one CRTC) -------------------
+
+
+def iowr(nr, size):
+    return (3 << 30) | (size << 16) | (ord("d") << 8) | nr
+
+
+MODEINFO = struct.Struct("I5H5HII I32s")          # struct drm_mode_modeinfo
+CARD_RES = struct.Struct("QQQQIIIIIIII")
+GET_CONNECTOR = struct.Struct("QQQQIIIIIIIIIIII")
+GET_ENCODER = struct.Struct("IIIII")
+CREATE_DUMB = struct.Struct("IIIIIIQ")
+MAP_DUMB = struct.Struct("IIQ")
+ADDFB = struct.Struct("IIIIIII")
+SETCRTC_HEAD = struct.Struct("QIIIIIII")
+PAGE_FLIP = struct.Struct("IIIIQ")
+
+IOCTL_GETRESOURCES = iowr(0xA0, CARD_RES.size)
+IOCTL_SETCRTC = iowr(0xA2, SETCRTC_HEAD.size + MODEINFO.size)
+IOCTL_GETENCODER = iowr(0xA6, GET_ENCODER.size)
+IOCTL_GETCONNECTOR = iowr(0xA7, GET_CONNECTOR.size)
+IOCTL_ADDFB = iowr(0xAE, ADDFB.size)
+IOCTL_PAGE_FLIP = iowr(0xB0, PAGE_FLIP.size)
+IOCTL_CREATE_DUMB = iowr(0xB2, CREATE_DUMB.size)
+IOCTL_MAP_DUMB = iowr(0xB3, MAP_DUMB.size)
+
+
+def ioctl(fd, req, st, *fields):
+    buf = bytearray(st.pack(*fields))
+    fcntl.ioctl(fd, req, buf)
+    return st.unpack(buf)
+
+
+def u32_array(n):
+    a = bytearray(4 * max(n, 1))
+    return a, ctypes_addr(a)
+
+
+def ctypes_addr(buf):
+    import ctypes
+    return ctypes.addressof((ctypes.c_char * len(buf)).from_buffer(buf))
+
+
+class Display:
+    def __init__(self, path="/dev/dri/card0"):
+        self.fd = os.open(path, os.O_RDWR)
+        res = ioctl(self.fd, IOCTL_GETRESOURCES, CARD_RES, *([0] * 12))
+        n_crtc, n_conn = res[5], res[6]
+        crtcs, crtcs_p = u32_array(n_crtc)
+        conns, conns_p = u32_array(n_conn)
+        ioctl(self.fd, IOCTL_GETRESOURCES, CARD_RES, 0, crtcs_p, conns_p, 0,
+              0, n_crtc, n_conn, 0, 0, 0, 0, 0)
+        crtc_ids = struct.unpack("%dI" % n_crtc, crtcs[:4 * n_crtc])
+        for cid in struct.unpack("%dI" % n_conn, conns[:4 * n_conn]):
+            c = ioctl(self.fd, IOCTL_GETCONNECTOR, GET_CONNECTOR, *([0] * 8), cid, *([0] * 7))
+            n_modes, n_enc, connection = c[4], c[6], c[11]
+            if connection != 1 or n_modes == 0:       # 1 = connected
+                continue
+            modes = bytearray(MODEINFO.size * n_modes)
+            encs, encs_p = u32_array(n_enc)
+            ioctl(self.fd, IOCTL_GETCONNECTOR, GET_CONNECTOR, encs_p, ctypes_addr(modes), 0, 0,
+                  n_modes, 0, n_enc, 0, cid, *([0] * 7))
+            self.mode = bytes(modes[:MODEINFO.size])       # first = preferred
+            self.connector = cid
+            enc_id = c[7] or struct.unpack("I", encs[:4])[0]
+            e = ioctl(self.fd, IOCTL_GETENCODER, GET_ENCODER, enc_id, 0, 0, 0, 0)
+            self.crtc = e[2] or next(crtc_ids[i] for i in range(n_crtc) if e[3] >> i & 1)
+            break
+        else:
+            raise SystemExit("no connected display")
+        m = MODEINFO.unpack(self.mode)
+        self.width, self.height = m[1], m[6]
+        self.buffers = [self._dumb() for _ in range(2)]
+        self.front = None
+
+    def _dumb(self):
+        d = ioctl(self.fd, IOCTL_CREATE_DUMB, CREATE_DUMB, self.height, self.width, 32, 0, 0, 0, 0)
+        handle, pitch, size = d[4], d[5], d[6]
+        off = ioctl(self.fd, IOCTL_MAP_DUMB, MAP_DUMB, handle, 0, 0)[2]
+        mem = mmap.mmap(self.fd, size, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE, offset=off)
+        fb = ioctl(self.fd, IOCTL_ADDFB, ADDFB, 0, self.width, self.height, pitch, 32, 24, handle)[0]
+        return {"fb": fb, "mem": mem, "pitch": pitch}
+
+    def show(self, img):
+        """img: RGB, display size. Draw into the back buffer and flip to it."""
+        b = self.buffers[1] if self.front is self.buffers[0] else self.buffers[0]
+        data = img.tobytes("raw", "BGRX")
+        row = self.width * 4
+        if b["pitch"] == row:
+            b["mem"][:len(data)] = data
+        else:
+            for y in range(self.height):
+                b["mem"][y * b["pitch"]:y * b["pitch"] + row] = data[y * row:(y + 1) * row]
+        if self.front is None:
+            conn = bytearray(struct.pack("I", self.connector))
+            fcntl.ioctl(self.fd, IOCTL_SETCRTC, bytearray(
+                SETCRTC_HEAD.pack(ctypes_addr(conn), 1, self.crtc, b["fb"], 0, 0, 0, 1) + self.mode))
+        else:
+            for _ in range(100):           # previous flip may still be pending
+                try:
+                    ioctl(self.fd, IOCTL_PAGE_FLIP, PAGE_FLIP, self.crtc, b["fb"], 0, 0, 0)
+                    break
+                except OSError:
+                    time.sleep(0.01)
+        self.front = b
+
+    def close(self):
+        os.close(self.fd)   # drops DRM master, frees the buffers
+
+
+# ---- drawing ---------------------------------------------------------------
+
+CHOICES = (("gamescope", "Steam"), ("plasma", "Plasma"))
+# Black and white, no text: the selected logo white, the other dim.
+BLACK, WHITE, DIM = (0, 0, 0), (255, 255, 255), (70, 70, 70)
+def asset(name):
+    """Logo PNG (white + alpha) next to the script, or installed in /usr/local/share/pa2q."""
+    here = os.path.join(os.path.dirname(os.path.realpath(__file__)), name)
+    return here if os.path.exists(here) else os.path.join("/usr/local/share/pa2q", name)
+
+
+# The Steam mark is the official one, traced from the Steam client UI's own SVG.
+LOGOS = (asset("pa2q-greeter-steam.png"), asset("pa2q-greeter-plasma.png"))  # logo PNGs not published (Steam trademark)
+
+
+def layout(w, h):
+    """Logo squares in landscape coordinates (w > h): Steam left, Plasma right."""
+    size = h * 0.42
+    cy = h * 0.5
+    return [(w * cx - size / 2, cy - size / 2, w * cx + size / 2, cy + size / 2) for cx in (0.30, 0.70)]
+
+
+def tinted(path, size, color):
+    a = Image.open(path).convert("RGBA").resize((size, size), Image.LANCZOS)
+    out = Image.new("RGBA", a.size, color + (0,))
+    out.putalpha(a.getchannel("A"))
+    return out
+
+
+def render(w, h, sel):
+    img = Image.new("RGB", (w, h), BLACK)
+    for i, r in enumerate(layout(w, h)):
+        size = int(r[2] - r[0])
+        on = i == sel
+        logo = tinted(LOGOS[i], int(size * (0.92 if i == 0 else 0.86)), WHITE if on else DIM)
+        x = int((r[0] + r[2]) / 2 - logo.size[0] / 2)
+        y = int((r[1] + r[3]) / 2 - logo.size[1] / 2)
+        img.paste(logo, (x, y), logo)
+    return img
+
+
+# ---- input -------------------------------------------------------------------
+
+EVENT = struct.Struct("llHHi")
+EV_SYN, EV_KEY, EV_ABS = 0, 1, 3
+KEY_TAB, KEY_ENTER, KEY_LEFT, KEY_RIGHT, KEY_UP, KEY_DOWN = 15, 28, 105, 106, 103, 108
+KEY_VOLUMEDOWN, KEY_VOLUMEUP, KEY_POWER, KEY_KPENTER = 114, 115, 116, 96
+BTN_SOUTH, BTN_START = 0x130, 0x13B
+BTN_DPAD_LEFT, BTN_DPAD_RIGHT = 0x222, 0x223
+ABS_X, ABS_HAT0X = 0x00, 0x10
+ABS_MT_SLOT, ABS_MT_POSITION_X, ABS_MT_POSITION_Y, ABS_MT_TRACKING_ID = 0x2F, 0x35, 0x36, 0x39
+MOVE_KEYS = {KEY_LEFT: -1, KEY_UP: -1, KEY_VOLUMEUP: -1, BTN_DPAD_LEFT: -1,
+             KEY_RIGHT: 1, KEY_DOWN: 1, KEY_VOLUMEDOWN: 1, BTN_DPAD_RIGHT: 1, KEY_TAB: 1}
+PICK_KEYS = {KEY_ENTER, KEY_KPENTER, KEY_POWER, BTN_SOUTH, BTN_START}
+
+
+def absinfo(fd, code):
+    buf = bytearray(24)          # struct input_absinfo: value min max fuzz flat res
+    fcntl.ioctl(fd, (2 << 30) | (24 << 16) | (ord("E") << 8) | (0x40 + code), buf)
+    return struct.unpack("6i", buf)
+
+
+def open_inputs():
+    devs = {}
+    for p in glob.glob("/dev/input/event*"):
+        try:
+            fd = os.open(p, os.O_RDONLY | os.O_NONBLOCK)
+        except OSError:
+            continue
+        info = {"stick": None, "touch": None}
+        try:
+            mn, mx = absinfo(fd, ABS_X)[1:3]
+            if mx > mn:
+                info["stick"] = (mn, mx)
+            tx, ty = absinfo(fd, ABS_MT_POSITION_X), absinfo(fd, ABS_MT_POSITION_Y)
+            if tx[2] > 0 and ty[2] > 0:
+                info["touch"] = (tx[2], ty[2])
+        except OSError:
+            pass
+        devs[fd] = info
+    return devs
+
+
+def choose(first):
+    disp = Display()
+    W, H = disp.height, disp.width          # portrait panel, landscape UI
+    sel = 0 if first != "plasma" else 1
+
+    def draw():
+        # The panel scans out portrait; rotate the landscape UI like Plasma's
+        # "left" orientation.
+        disp.show(render(W, H, sel).rotate(90, expand=True))
+
+    def move(step):
+        nonlocal sel
+        sel = (sel + step) % 2
+        draw()
+
+    draw()
+    devs = open_inputs()
+    stick_centered = True
+    touch = {}                      # per device: [slot, x, y, down]
+    try:
+        while True:
+            for fd in select.select(list(devs), [], [])[0]:
+                try:
+                    data = os.read(fd, EVENT.size * 64)
+                except OSError:
+                    continue
+                for o in range(0, len(data) - EVENT.size + 1, EVENT.size):
+                    _, _, typ, code, val = EVENT.unpack_from(data, o)
+                    info = devs[fd]
+                    if typ == EV_KEY and val == 1:
+                        if code in PICK_KEYS:
+                            return CHOICES[sel][0]
+                        if code in MOVE_KEYS:
+                            move(MOVE_KEYS[code])
+                    elif typ == EV_ABS and code == ABS_HAT0X and val:
+                        move(1 if val > 0 else -1)
+                    elif typ == EV_ABS and code == ABS_X and info["stick"] and not info["touch"]:
+                        mn, mx = info["stick"]
+                        t = (val - mn) / (mx - mn) * 2 - 1
+                        if abs(t) > 0.6 and stick_centered:
+                            stick_centered = False
+                            move(1 if t > 0 else -1)
+                        elif abs(t) < 0.3:
+                            stick_centered = True
+                    elif info["touch"]:
+                        st = touch.setdefault(fd, [0, 0, 0, False])
+                        if typ == EV_ABS and code == ABS_MT_POSITION_X:
+                            st[1] = val
+                        elif typ == EV_ABS and code == ABS_MT_POSITION_Y:
+                            st[2] = val
+                        elif typ == EV_ABS and code == ABS_MT_TRACKING_ID:
+                            if val >= 0:
+                                st[3] = True
+                            elif st[3]:
+                                st[3] = False
+                                # panel (portrait) -> landscape UI, inverse of rotate(90)
+                                px = st[1] / info["touch"][0] * disp.width
+                                py = st[2] / info["touch"][1] * disp.height
+                                lx, ly = W - 1 - py, px
+                                for i, r in enumerate(layout(W, H)):
+                                    if r[0] <= lx <= r[2] and r[1] <= ly <= r[3]:
+                                        sel = i
+                                        draw()
+                                        return CHOICES[i][0]
+    finally:
+        for fd in devs:
+            os.close(fd)
+        disp.close()
+
+
+if __name__ == "__main__":
+    if sys.argv[1:2] == ["--render"]:        # preview: pa2q-greeter --render out.png [plasma]
+        render(3120, 1440, 1 if sys.argv[3:4] == ["plasma"] else 0).save(sys.argv[2])
+    else:
+        print(choose(sys.argv[1] if len(sys.argv) > 1 else "gamescope"))

@@ -1,0 +1,38 @@
+#!/bin/sh
+# pa2q: Steam gaming mode - gamescope straight on the display (DRM backend),
+# running Steam ARM's gamepad UI. Started by pa2q-session.
+[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && exec dbus-run-session -- "$0" "$@"
+# Keep this session's log across a hang/reboot (SDDM overwrites its own).
+L=$HOME/.local/state/pa2q-gamescope.log
+mkdir -p "${L%/*}" && mv -f "$L" "$L.prev" 2>/dev/null
+exec >>"$L" 2>&1
+# Steam's game runtime (pressure-vessel) and its CEF expect the session bus at
+# $XDG_RUNTIME_DIR/bus; dbus-run-session puts it under /tmp. Without the link
+# every Proton game quits at once ("bwrap: Can't find source path .../bus").
+b=${DBUS_SESSION_BUS_ADDRESS#unix:path=}; b=${b%%,*}
+[ -S "$b" ] && [ "$b" != "$XDG_RUNTIME_DIR/bus" ] && ln -sfn "$b" "$XDG_RUNTIME_DIR/bus"
+/usr/libexec/pipewire-launcher >/dev/null 2>&1 &
+/usr/local/bin/pa2q-rotate-gesture &   # 3-finger Steam menus
+/usr/local/bin/pa2q-keys &             # volume keys, power = sleep
+# Gamescope's Vulkan must report the display's DRM nodes (KGSL is not DRM);
+# see turnip-kgsl-report-display-drm.patch. Xwayland GL: zink via kmsro.
+export VK_DRIVER_FILES=/etc/vulkan/icd.d/freedreno_kgsl_drm_icd.json
+export VK_ICD_FILENAMES=$VK_DRIVER_FILES
+export TU_KGSL_DRM_RENDER=/dev/dri/renderD128 TU_KGSL_DRM_PRIMARY=/dev/dri/card0
+export TU_DEBUG=nocb MESA_LOADER_DRIVER_OVERRIDE=kmsro
+export STEAM_ARM_DEVICE=${STEAM_ARM_DEVICE:--steamdeck}
+# -usepipewireaudio: Steam's PipeWire audio manager. Without it the client
+# picks its "default" manager: the volume popup shows, the volume never changes.
+# Panel is 1440x3120 portrait; games render at half the landscape size.
+# 60 Hz: with compositor rotation gamescope composites every frame of the
+# full panel; at the panel's 120 Hz that is twice the GPU work and heat for
+# games that mostly run at 60 anyway. PA2Q_GAMESCOPE_HZ=120 to override.
+# Rotate in the compositor: SDE's inline rotator takes at most 1088 lines and
+# rejects the panel's 1440 ("invalid height for inline rot"), so every
+# scanout-rotated commit failed with EINVAL (black screen).
+gamescope --backend drm -e --force-orientation "${PA2Q_GAMESCOPE_ORIENTATION:-left}" \
+	--force-composition-rotation \
+	-r "${PA2Q_GAMESCOPE_HZ:-60}" \
+	-w 1560 -h 720 --default-touch-mode 4 \
+	-- /usr/local/bin/steam-arm --bigpicture -usepipewireaudio
+kill $(jobs -p) 2>/dev/null

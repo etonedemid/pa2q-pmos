@@ -1,0 +1,15 @@
+#!/bin/sh
+# Relaunch plasmashell when it dies (Plasma autostart).
+#
+# kwin_wayland_wrapper already restarts kwin after a crash, but plasmashell
+# loses its Wayland connection and exits, and without systemd user units nothing
+# starts it again: black desktop with only a cursor. Checking every few seconds
+# is enough; the first check waits for the session's own plasmashell.
+sleep 15
+# Exit with our session (its plasma_session): a watchdog left over from an
+# ended session would start plasmashell into the next one.
+SESSION=$(pgrep -u "$(id -u)" -x plasma_session | head -1)
+while [ -n "$SESSION" ] && [ -d /proc/$SESSION ]; do
+	pgrep -u "$(id -u)" -x plasmashell >/dev/null || kstart plasmashell >/dev/null 2>&1
+	sleep 3
+done

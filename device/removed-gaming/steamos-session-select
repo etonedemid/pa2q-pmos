@@ -1,0 +1,12 @@
+#!/bin/sh
+# pa2q: SteamOS's session switch, as Steam ARM calls it inside the container
+# ("Switch to Desktop" runs `steamos-session-select plasma`). Writes the
+# choice pa2q-session reads, then stops Steam; gamescope exits with it and
+# SDDM logs back in (Relogin=true) to the picked session.
+case "${1:-gamescope}" in plasma*|desktop) s=plasma ;; *) s=gamescope ;; esac
+# Steam ARM runs with HOME=~/.local/share/steam-arm; use the real home.
+H=$(getent passwd "$(id -u)" | cut -d: -f6)
+mkdir -p "$H/.config" && echo "$s" > "$H/.config/pa2q-session"
+: > "$H/.config/pa2q-session.switch"       # skip the greeter this once
+"$H/.local/share/steam-arm/.local/share/Steam/steamrtarm64/steam" -shutdown >/dev/null 2>&1 &
+exit 0

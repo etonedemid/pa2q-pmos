@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+# Phone buttons in gaming mode (started by pa2q-gamescope-session):
+#   volume up / down: default PipeWire sink +-5% (held: repeats)
+#   power, short press: suspend, like a Steam Deck
+# The keys sit on three separate devices (gpio-keys: volume up, pmic_resin:
+# volume down, pmic_pwrkey: power) and bounce; they are grabbed (EVIOCGRAB) so
+# gamescope/Steam do not act on them too. Plasma handles them itself.
+import fcntl
+import glob
+import os
+import select
+import struct
+import subprocess
+import time
+
+EVENT = struct.Struct("llHHi")
+EV_KEY = 1
+KEY_VOLUMEDOWN, KEY_VOLUMEUP, KEY_POWER = 114, 115, 116
+EVIOCGRAB = 0x40044590
+DEVICES = ("gpio-keys", "pmic_resin", "pmic_pwrkey")
+STEP = "5%"
+DEBOUNCE_S = 0.08      # ignore a second press within this (contact bounce)
+REPEAT_DELAY_S, REPEAT_S = 0.4, 0.12
+LONG_PRESS_S = 1.0     # power held this long: not a sleep request
+# The press that wakes the phone arrives after resume; monotonic time stops
+# while suspended, so this window covers it.
+WAKE_IGNORE_S = 3.0
+
+
+def open_devices():
+    fds = []
+    for d in glob.glob("/sys/class/input/event*"):
+        with open(d + "/device/name") as f:
+            if f.read().strip() in DEVICES:
+                fd = os.open("/dev/input/" + os.path.basename(d), os.O_RDONLY)
+                fcntl.ioctl(fd, EVIOCGRAB, 1)
+                fds.append(fd)
+    return fds
+
+
+def volume(key):
+    sign = "+" if key == KEY_VOLUMEUP else "-"
+    subprocess.run(["wpctl", "set-volume", "-l", "1.0", "@DEFAULT_AUDIO_SINK@", STEP + sign])
+
+
+def suspend():
+    subprocess.run(["loginctl", "suspend"])
+
+
+def main():
+    fds = open_devices()
+    held, last_press, next_repeat = None, {}, 0.0
+    power_down, ignore_power_until = None, 0.0
+    while True:
+        timeout = max(0.0, next_repeat - time.monotonic()) if held else None
+        ready = select.select(fds, [], [], timeout)[0]
+        now = time.monotonic()
+        if not ready:                     # volume key still held: repeat
+            volume(held)
+            next_repeat = now + REPEAT_S
+            continue
+        for fd in ready:
+            _, _, typ, code, val = EVENT.unpack(os.read(fd, EVENT.size))
+            if typ != EV_KEY or val == 2:   # own repeat, ignore kernel autorepeat
+                continue
+            if code in (KEY_VOLUMEUP, KEY_VOLUMEDOWN):
+                if val == 1:
+                    if now - last_press.get(code, 0.0) < DEBOUNCE_S:
+                        continue
+                    last_press[code] = now
+                    volume(code)
+                    held, next_repeat = code, now + REPEAT_DELAY_S
+                elif held == code:
+                    held = None
+            elif code == KEY_POWER:
+                if now < ignore_power_until:
+                    power_down = None
+                elif val == 1:
+                    power_down = now
+                elif power_down is not None:
+                    if now - power_down < LONG_PRESS_S:
+                        suspend()
+                        ignore_power_until = time.monotonic() + WAKE_IGNORE_S
+                    power_down = None
+
+
+if __name__ == "__main__":
+    main()

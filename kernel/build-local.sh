@@ -4,7 +4,7 @@
 # CFI_CLANG / SHADOW_CALL_STACK and flips KASAN_HW_TAGS -> KASAN_GENERIC,
 # which breaks the GKI KMI and stops Samsung's prebuilt vendor modules loading.
 set -euo pipefail
-TOOLCHAIN="${TOOLCHAIN:-$HOME/toolchains/clang-r510928}"
+TOOLCHAIN="${TOOLCHAIN:-$HOME/Desktop/Projects/phone-pmos/toolchains/clang-r510928}"
 [ -x "$TOOLCHAIN/bin/clang" ] || { echo "ERROR: need AOSP clang at $TOOLCHAIN/bin/clang"; exit 1; }
 export PATH="$TOOLCHAIN/bin:$HOME/bin:$PATH"
 KROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

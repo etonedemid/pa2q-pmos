@@ -1,0 +1,9 @@
+#!/bin/sh
+# pa2q: pick the session pa2q-session starts and log out to it.
+#   pa2q-session-select gamescope | plasma
+case "${1:-}" in gamescope|plasma) ;; *) echo "usage: $0 gamescope|plasma" >&2; exit 2 ;; esac
+mkdir -p "$HOME/.config" && echo "$1" > "$HOME/.config/pa2q-session"
+: > "$HOME/.config/pa2q-session.switch"     # skip the greeter this once
+if [ "$1" = gamescope ]; then
+	qdbus6 org.kde.Shutdown /Shutdown org.kde.Shutdown.logout
+fi

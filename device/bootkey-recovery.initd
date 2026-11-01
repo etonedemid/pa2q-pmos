@@ -1,23 +1,60 @@
 #!/sbin/openrc-run
-description="Hold VOLUME-UP at boot to switch back to Android"
+description="Back to Android: hold VOLUME-UP at boot, or automatically after a pmOS boot that never finished"
+
+# Boots that started but were never confirmed by boot-ok (default runlevel).
+FAILS=/var/lib/dualboot/bootfails
+# A boot not confirmed by boot-ok by this uptime is treated as hung: stop
+# petting the watchdog (gh_wdt_tame) so the phone resets instead of sitting
+# there hung and hot. touch /etc/pmos-no-deadline to disable.
+DEADLINE=240
+# dmesg + OpenRC progress, rewritten every 2 s until boot-ok, so a boot that
+# hard-hangs leaves its last seconds on disk (last_kmsg stops at ~0.7 s here).
+TRACE=/var/log/boot-trace.log
 
 depend() {
-    need dev
-    after udev udev-trigger
-    before display-manager sddm xdm dbus elogind local
+	# sysinit, as early as possible: gpio-keys is built into the kernel, so
+	# /dev/input exists as soon as devtmpfs is up. Run before udev coldplug and
+	# before 'modules', where a bad vendor module (msm_drm) can hang the SoC.
+	need devfs
+	before udev udev-trigger udev-settle modules hwdrivers
+}
+
+to_android() {
+	ewarn "$1 -> switching to Android"
+	echo 0 > "$FAILS"; sync
+	/usr/local/bin/boot-switch android
+	eerror "boot-switch android failed - continuing pmOS boot"
+}
+
+trace() {
+	[ -f $TRACE ] && mv -f $TRACE $TRACE.prev
+	while [ ! -e /run/pmos-boot-ok ]; do
+		{ echo "uptime $(cut -d' ' -f1 /proc/uptime)"
+		  echo "starting: $(ls /run/openrc/starting 2>/dev/null | tr '\n' ' ')"
+		  echo "started: $(ls /run/openrc/started 2>/dev/null | tr '\n' ' ')"
+		  dmesg
+		} > $TRACE.tmp 2>&1
+		mv -f $TRACE.tmp $TRACE; sync
+		up=$(cut -d. -f1 /proc/uptime)
+		if [ "$up" -ge $DEADLINE ] && [ ! -e /etc/pmos-no-deadline ]; then
+			echo "<2>bootkey-recovery: boot not confirmed by ${DEADLINE}s uptime - letting the watchdog reset the phone" > /dev/kmsg
+			echo 0 > /sys/module/gh_wdt_tame/parameters/pet
+			DEADLINE=999999
+		fi
+		sleep 2
+	done
 }
 
 start() {
-    ebegin "Checking for VOLUME-UP recovery hold"
-    if /usr/local/bin/bootkey-recovery; then
-        eend 0 "not held"
-    else
-        rc=$?
-        if [ "$rc" = 10 ]; then
-            ewarn "VOLUME-UP held -> switching to Android"
-            /usr/local/bin/boot-switch android
-            # boot-switch reboots; if it returns, do not continue booting pmOS
-        fi
-        eend 0
-    fi
+	ebegin "Checking for VOLUME-UP recovery hold"
+	/usr/local/bin/bootkey-recovery
+	[ $? -eq 10 ] && to_android "VOLUME-UP held"
+
+	n=$(cat "$FAILS" 2>/dev/null)
+	case "$n" in ''|*[!0-9]*) n=0 ;; esac
+	[ "$n" -ge 1 ] && to_android "the last pmOS boot never finished"
+	echo $((n + 1)) > "$FAILS"; sync
+
+	trace >/dev/null 2>&1 &
+	eend 0
 }

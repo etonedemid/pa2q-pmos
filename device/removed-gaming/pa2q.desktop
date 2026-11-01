@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=pa2q (Plasma or Steam gaming mode)
+Comment=Plasma, or Steam in gamescope when gaming mode was picked last
+Exec=/usr/local/bin/pa2q-session
+Type=Application
+DesktopNames=KDE

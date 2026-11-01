@@ -1,0 +1,13 @@
+#!/sbin/openrc-run
+description="AudioReach Graph Manager server (org.Qti.AgmService) + pa2q speaker route"
+supervisor=supervise-daemon
+command=/usr/libexec/pa2q-agm-server
+respawn_delay=2
+respawn_max=5
+output_log=/var/log/agm_server.log
+error_log=/var/log/agm_server.log
+
+depend() {
+	need dbus
+	after modules udev-settle pmos-audio
+}

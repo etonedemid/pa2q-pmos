@@ -1,0 +1,26 @@
+#!/bin/sh
+# pa2q: SDDM session that starts either Plasma or the Steam gaming mode
+# (gamescope only, no Plasma), whichever was picked last:
+#   ~/.config/pa2q-session = gamescope | plasma (default)
+# Switch to gaming mode: "Gaming Mode" icon (pa2q-session-select gamescope).
+# Back: Steam > Power > Switch to Desktop (steamos-session-select in the
+# Steam container writes "plasma").
+F=$HOME/.config/pa2q-session
+mkdir -p "$HOME/.config" "$HOME/.local/state"
+# Boot / relogin: two-button greeter (pa2q-greeter), last choice preselected.
+# A deliberate switch (pa2q-session-select, steamos-session-select) leaves
+# $F.switch and goes straight to the picked session once.
+if [ -e "$F.switch" ]; then
+	rm -f "$F.switch"
+elif pick=$(/usr/local/bin/pa2q-greeter "$(cat "$F" 2>/dev/null)" 2>>"$HOME/.local/state/pa2q-greeter.log"); then
+	echo "$pick" > "$F"
+fi
+if [ "$(cat "$F" 2>/dev/null)" = gamescope ]; then
+	start=$(date +%s)
+	/usr/local/bin/pa2q-gamescope-session
+	# A gaming session that dies right away must not trap the phone in a
+	# relogin loop: fall back to Plasma next time.
+	[ $(($(date +%s) - start)) -lt 30 ] && echo plasma > "$F"
+	exit 0
+fi
+exec /usr/lib/libexec/plasma-dbus-run-session-if-needed /usr/bin/startplasma-wayland

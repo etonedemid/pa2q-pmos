@@ -1,0 +1,25 @@
+pa2q: KGSL builds present through the CPU (shm) WSI path.
+
+Turnip registers its WSI as a hardware device (sw_device = false), so the
+Wayland and X11 WSI build WSI_IMAGE_TYPE_DRM image params. A KGSL-only build
+has no libdrm, so wsi_common.c compiles the DRM case out of get_blit_type()
+and configure_image() and the release build's UNREACHABLE lets the compiler
+treat every image as CPU: the DRM params' num_modifier_lists (1) is read as
+the alloc_shm callback and the first vkCreateSwapchainKHR jumps to 0x1
+(SIGBUS). Every Vulkan window on the desktop died that way (vkcube, zink
+without kmsro, games). Report a software WSI device on KGSL instead.
+
+--- a/src/freedreno/vulkan/tu_wsi.cc
++++ b/src/freedreno/vulkan/tu_wsi.cc
+@@ -38,7 +38,10 @@
+ {
+    VkResult result;
+ 
+-   const struct wsi_device_options options = { .sw_device = false };
++   /* KGSL is not a DRM device: present through shm, not dma-buf images. */
++   const struct wsi_device_options options = {
++      .sw_device = strcmp(physical_device->instance->knl->name, "kgsl") == 0,
++   };
+    result = wsi_device_init(&physical_device->wsi_device,
+                             tu_physical_device_to_handle(physical_device),
+                             tu_wsi_proc_addr,

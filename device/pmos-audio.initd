@@ -1,0 +1,38 @@
+#!/sbin/openrc-run
+# Bring up the sound card and the AudioReach userspace chroot.
+#
+# Two separate things have to happen and neither is automatic:
+#   1. vendor-up.sh audio  - install ADSP firmware, start the ADSP and the
+#      audio protection domain, load the codec modules, then drive the machine
+#      driver past qcom,max_defer_count so the card registers at all
+#      (see pmos-audio-card.sh for why that is necessary).
+#   2. pmos-adroot.sh      - assemble /opt/adroot, the bionic chroot holding
+#      the vendor AGM binaries, since nothing moves audio without them.
+#
+# This is slow (the ADSP alone needs ~20s) and nothing else in the boot
+# depends on it, so it runs in the background and never blocks.
+description="Sound card (ADSP + AudioReach) and the vendor audio chroot"
+
+depend() {
+	need localmount
+	after udev
+}
+
+start() {
+	ebegin "Bringing up audio"
+	if [ -e /proc/asound/card0 ]; then
+		eend 0 "already up"
+		return 0
+	fi
+	(
+		/usr/local/bin/vendor-up.sh audio
+		/usr/local/bin/pmos-adroot.sh
+	) >/var/log/audio-up.log 2>&1 &
+	# Deliberately not waited on: a missing sound card must never hold up
+	# the boot, and the caller can check /var/log/audio-up.log.
+	eend 0 "started in background - see /var/log/audio-up.log"
+}
+
+stop() {
+	return 0
+}

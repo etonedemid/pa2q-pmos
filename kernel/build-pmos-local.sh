@@ -4,12 +4,12 @@
 # DEVTMPFS_MOUNT (needed for /dev/kmsg before init), SPLASH_CONSOLE,
 # PANIC_ON_OOPS off, and rdinit=/pmos-init.
 set -euo pipefail
-TOOLCHAIN="${TOOLCHAIN:-$HOME/toolchains/clang-r510928}"
+TOOLCHAIN="${TOOLCHAIN:-$HOME/Desktop/Projects/phone-pmos/toolchains/clang-r510928}"
 [ -x "$TOOLCHAIN/bin/clang" ] || { echo "ERROR: need AOSP clang r510928"; exit 1; }
 export PATH="$TOOLCHAIN/bin:$HOME/bin:$PATH"
 KROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="$KROOT/out-pmos"
-CFG=$HOME/pmaports-ref/device/testing/linux-samsung-pa2q/config-samsung-pa2q.aarch64
+CFG=$HOME/Desktop/Projects/phone-pmos/pmaports-ref/device/testing/linux-samsung-pa2q/config-samsung-pa2q.aarch64
 export ARCH=arm64 SUBARCH=arm64
 export CROSS_COMPILE=aarch64-linux-gnu- CLANG_TRIPLE=aarch64-linux-gnu-
 export KCFLAGS="-O2 -pipe -Wno-error -D__ANDROID_COMMON_KERNEL__"

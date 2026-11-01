@@ -2,11 +2,11 @@
 # Rebuild ONLY the msm_drm.ko display module against the running kernel's
 # objtree (k698/out-698ns), mirroring build-698-ns.sh's toolchain env.
 set -euo pipefail
-TOOLCHAIN="${TOOLCHAIN:-$HOME/toolchains/clang-r510928}"
+TOOLCHAIN="${TOOLCHAIN:-$HOME/Desktop/Projects/phone-pmos/toolchains/clang-r510928}"
 export PATH="$TOOLCHAIN/bin:$HOME/bin:$PATH"
-KROOT=/home/etonedemid/k698
+KROOT=$HOME/Desktop/Projects/phone-pmos/k698
 OUT="$KROOT/out-698ns"
-MOD=/home/etonedemid/samsung-src/kernel_platform/vendor/qcom/opensource/display-drivers
+MOD=$HOME/Desktop/Projects/phone-pmos/samsung-src/kernel_platform/vendor/qcom/opensource/display-drivers
 export ARCH=arm64 SUBARCH=arm64
 export CROSS_COMPILE=aarch64-linux-gnu- CLANG_TRIPLE=aarch64-linux-gnu-
 export KCFLAGS="-O2 -pipe -Wno-error -D__ANDROID_COMMON_KERNEL__"
