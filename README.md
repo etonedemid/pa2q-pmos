@@ -2,10 +2,10 @@
 
 Bring-up work-product and findings for running **postmarketOS** on the Samsung
 Galaxy S25+ — codename **pa2q**, SoC **SM8750 / "sun"**, panel
-**PA2_S6E3HAF_AMB666FM03** — **dual-booting alongside stock Android**.
+**PA2_S6E3HAF_AMB666FM03**: KDE Plasma on Samsung's own kernel and vendor drivers.
 
 This repo is **not** the kernel tree. It collects the source changes, build
-recipes, on-device tools, recovery tooling, and the investigation notes that
+recipes, on-device tools, and the investigation notes that
 together make the device boot pmOS. The kernel source itself lives in the
 `android_kernel_samsung_sm8750` fork; the pmOS-specific additions are mirrored
 here under [`kernel/`](kernel/) so the whole picture is in one place.
@@ -14,7 +14,6 @@ here under [`kernel/`](kernel/) so the whole picture is in one place.
 
 ## Status at a glance
 
-- Dual-boot Android <-> pmOS - yes, one command or one icon
 - Wi-Fi - yes
 - Display - yes, KDE Plasma (Wayland), autologin, screen off/on works (needs `debugcc_sun`, see below)
 - GPU - yes, Adreno 830 via turnip (KGSL), OpenGL ES 3.2 via zink
@@ -32,7 +31,7 @@ here under [`kernel/`](kernel/) so the whole picture is in one place.
 
 ```
 kernel/          pmOS-specific kernel additions + build recipes
-  build-local.sh            Android-config kernel build (24-core host)
+  build-local.sh            stock-config kernel build (24-core host)
   build-pmos-local.sh       pmOS-config kernel build (rdinit, VT, devtmpfs, splash)
   build-698-ns.sh           k698 GKI "module-friendly" build (the running kernel)
   splashcon.c / _logo.h     boot-splash console (renders into cont-splash FB)
@@ -52,14 +51,12 @@ build/           display module build/deploy scripts
   build-msmdrm.sh, deploy-msmdrm.sh
 
 device/          on-device tools
-  boot-switch               write+verify boot chain, switch Android⇄pmOS
-  bootkey-recovery.py/.initd vol-up-at-boot / boot-loop → switch to Android (sysinit)
-  boot-ok.initd             marks a pmOS boot as finished (resets the loop counter)
+  pa2q-gpu.sh               GPU env for Plasma (turnip KGSL ICD, zink)
+  turnip-kgsl-*.patch       turnip fixes for KGSL presentation
+  pa2q-speaker-bridge       PipeWire sink -> vendor agmplay
+  pa2q-rotate-gesture       4-finger double tap rotates the screen
+  pa2q-gamepad-desktop      gamepad as mouse/keys in Plasma
   dispcap                   capture the panel framebuffer
-
-recovery/        rootfs repair from Android
-  loopcfg.c                 4K-native loop mount helper (LOOP_CONFIGURE + DIRECT_IO)
-  setloopbsz.c              set loop block size
 ```
 
 ---
@@ -74,63 +71,23 @@ recovery/        rootfs repair from Android
 - `CONFIG_MODVERSIONS=y`; `CONFIG_MODULE_SIG_PROTECT=y` but `SIG_FORCE` off, so
   foreign-signed / foreign-vermagic Samsung prebuilts load (GKI gates on
   `module_layout` + KMI CRCs, not the release string).
-- **Partitions** (4K-logical GPT): `boot_a`=sda26, `init_boot_a`=sda27 (Android's
-  `/init`, untouched), `vendor_boot_a`=sda28, `dtbo_a`=sda36, `userdata`=sda59,
-  **`pmOS_root`=sda60**.
+- **Partitions** (4K-logical GPT): `boot_a`=sda26, `vendor_boot_a`=sda28,
+  `dtbo_a`=sda36, **`pmOS_root`=sda60**.
 - **USB networking (pmOS):** CDC-NCM gadget, device `172.16.42.1`, host
   `172.16.42.2/24`. SSH in as `root`.
 
-### Root and dual-boot (an unusual arrangement)
+### Boot
 
-- **Android runs the stock `boot_a.img` byte-for-byte.** Root comes from
-  **ReSukiSU in LKM mode** (a module loaded from `/data/adb`), not a patched boot
-  image — the patched boot-ksu image bootloops this firmware. See the
-  [ReSukiSU/SuSFS version ceiling](#credits--caveats) note.
-- Samsung **ignores the AOSP boot-control BCB**: `init_boot`'s `/init` wins, and
-  the recovery entry is `/system/bin/recovery`. So dual-boot is done by swapping
-  the **`boot` / `vendor_boot` / `dtbo`** trio, not via slots.
-- [`device/boot-switch`](device/boot-switch) writes and **md5-verifies** all three
-  images, then reboots:
-  ```
-  boot-switch android     # stock kernel + ReSukiSU root
-  boot-switch pmos        # postmarketOS on sda60
-  ```
-  It refuses to write a half-set (a missing image would leave an unbootable
-  kernel/ramdisk mix).
-- **Switch to Android** desktop/menu icon:
-  [`pa2q-switch-android.desktop`](device/pa2q-switch-android.desktop) runs
-  `pkexec /usr/local/bin/boot-switch android`. The polkit action
-  [`org.pa2q.boot-switch.policy`](device/org.pa2q.boot-switch.policy)
-  (`/usr/share/polkit-1/actions/`) binds that exact path, and
-  [`50-pa2q-boot-switch.rules`](device/50-pa2q-boot-switch.rules)
-  (`/etc/polkit-1/rules.d/`) allows it without a password for active local
-  `wheel` users.
-- **Reboot to Android** inside Steam: a non-Steam library entry
-  ([`pa2q-steam-shortcuts.py`](device/pa2q-steam-shortcuts.py) writes
-  `userdata/<id>/config/shortcuts.vdf` while Steam is stopped) runs
-  [`reboot-to-android`](device/reboot-to-android) in the Steam container. The
-  container cannot reach the host's polkit (`distrobox-host-exec` needs a
-  Flatpak D-Bus helper pmOS lacks), so it leaves `~/.cache/pa2q-reboot-android`
-  and `pa2q-rotate-gesture` (host, both sessions) runs `pkexec boot-switch
-  android`. Steam's right-side menu takes no custom entries without Decky.
-  Helpers restarted over SSH must be put back into the seat session's cgroup
-  (`echo PID > /sys/fs/cgroup/c1/cgroup.procs`) or polkit refuses them.
-- **Escape hatch:** hold **Volume-Up** from the Samsung logo until it reboots →
-  [`device/bootkey-recovery`](device/) switches back to Android. It runs in
-  OpenRC **sysinit, before udev and before `modules`**, so a vendor module that
-  hangs later in boot (msm_drm) can't block it, and `boot-switch` finds the
-  partitions through sysfs because udev's links don't exist yet.
-- **Boot-loop fallback:** the same service counts pmOS boots that never finish
-  (`/var/lib/dualboot/bootfails`; `boot-ok` resets it 60 s into the default
-  runlevel or on clean shutdown). After **1** unfinished boot the next boot
-  switches to Android on its own, and a boot not confirmed by 240 s uptime stops
-  petting the watchdog, so a hung phone resets itself and lands in Android.
-- **Boot trace:** until `boot-ok`, the service rewrites
-  `/var/log/boot-trace.log` every 2 s (dmesg + which OpenRC services are
-  starting); the previous boot's is `boot-trace.log.prev`. `/proc/last_kmsg`
-  only reaches ~0.7 s on this kernel, so this is where a hard hang shows up.
-- **Hang watcher (host):** `build/pmos-watch.sh --boot` right before switching
-  to pmOS; exits with a desktop alert on HUNG / RESET / DOWNLOAD.
+- pmOS boots from its own **`boot` / `vendor_boot` / `dtbo`** images; Samsung
+  ignores the AOSP slot / BCB boot control, so slots are not used.
+- **Boot trace:** until `boot-ok` (60 s into the default runlevel), a sysinit
+  service rewrites `/var/log/boot-trace.log` every 2 s (dmesg + which OpenRC
+  services are starting); the previous boot's is `boot-trace.log.prev`.
+  `/proc/last_kmsg` only reaches ~0.7 s on this kernel, so this is where a hard
+  hang shows up. A boot not confirmed by 240 s uptime stops petting the
+  watchdog, so a hung phone resets itself.
+- **Hang watcher (host):** `build/pmos-watch.sh --boot`; exits with a desktop
+  alert on HUNG / RESET / DOWNLOAD.
 
 ---
 
@@ -142,7 +99,7 @@ A distro clang silently drops `CFI_CLANG` / `SHADOW_CALL_STACK` and flips
 prebuilt vendor modules from loading. The build scripts assert these configs are
 present and abort otherwise.
 
-- [`kernel/build-local.sh`](kernel/build-local.sh) — Android defconfig build.
+- [`kernel/build-local.sh`](kernel/build-local.sh) — stock defconfig build.
 - [`kernel/build-pmos-local.sh`](kernel/build-pmos-local.sh) — pmOS build; uses the
   pmaports config carrying the pmOS delta (`VT`, `DEVTMPFS_MOUNT`, `SPLASH_CONSOLE`,
   `rdinit=/pmos-init`, `PANIC_ON_OOPS` off).
@@ -262,12 +219,6 @@ chip holds RX low, `msm_geni_serial` loops in an IRQ storm on CPU0
 petted from the other CPUs, so it needs a manual Vol-Down+Power reset. The old
 `pmos-bt-up.sh` does exactly that (power off -> `btattach`); don't run it.
 
-### SYSVIPC + namespaces (Android side)
-
-For containers / chroot on the Android side: `SYSVIPC` enabled ABI-safely on
-ReSukiSU + SuSFS, plus `PID_NS`, `DEVTMPFS`, `USER_NS`. Defconfig deltas in
-[`kernel/defconfig-sysvipc.patch`](kernel/defconfig-sysvipc.patch) and
-[`kernel/defconfig-namespaces.patch`](kernel/defconfig-namespaces.patch).
 
 ---
 
@@ -455,8 +406,7 @@ To catch the kwin crash: `echo /var/tmp/cores/core.%e.%p.%t >
 Steam ARM (Debian distrobox), the gamescope gaming session, the two-button
 greeter, the gaming-mode key daemon and their helpers were removed from the
 phone (Steam data, podman storage, `gamescope distrobox podman`), freeing
-~15 GB; for gaming, DroidDeck on Android is the better-tuned option on this
-phone. The files are kept in [`device/removed-gaming/`](device/removed-gaming/)
+~15 GB. The files are kept in [`device/removed-gaming/`](device/removed-gaming/)
 and the notes below describe how they worked. SDDM autologins straight into
 Plasma again (`Session=plasma.desktop`).
 
@@ -541,39 +491,6 @@ config for a GKI-external build is the open problem.
 
 ---
 
-## Recovery — fixing the pmOS rootfs from Android
-
-When a bad module bricks pmOS boot and SSH is gone, recover via Android (ReSukiSU
-root can reach the pmOS partition):
-
-1. `boot-switch android` (or Download-mode + `heimdall flash --BOOT_A boot_a.img
-   --VENDOR_BOOT_A vendor_boot_a.img --DTBO_A dtbo_a.img`). This boots Android with
-   root and **does not touch pmOS on sda60**.
-2. `adb` + `su`. pmOS rootfs is **`/dev/block/sda60`** (`pmOS_root`).
-3. sda60 is a **4K-logical GPT image**; rootfs (ext4) is partition 2 at **byte
-   offset 511705088**. A normal `losetup -o` presents 512-byte sectors and gets
-   **EIO** on the 4K disk.
-4. Use [`recovery/loopcfg.c`](recovery/loopcfg.c) — `LOOP_CONFIGURE` with
-   `block_size=4096` **and `LO_FLAGS_DIRECT_IO`** (direct-IO is what makes reads
-   succeed):
-   ```
-   losetup -f
-   loopcfg /dev/block/loopN /dev/block/sda60 511705088 4096
-   mount -t ext4 -o rw /dev/block/loopN /mnt/pmosroot
-   ```
-   Build: `clang --target=aarch64-linux-gnu -static -nostdlib -ffreestanding -O2 loopcfg.c -o loopcfg`.
-5. Restore the module: `cp .../vendor/msm_drm.ko.prebuilt .../vendor/msm_drm.ko`,
-   then **`depmod -a`** on the pmOS tree (a plain `cp` leaves `modules.dep` stale →
-   the prebuilt fails to pull `drm_display_helper` → unresolved `drm_dp_*` → no
-   display).
-6. Flash the pmOS boot chain back from the images on the rootfs itself
-   (`/var/lib/dualboot/pmos/{boot-ns-heap.img,vendor_boot-current.img,dtbo-noidlepc-nocbc.img}`).
-
-> The rootfs was created by **dd'ing `samsung-pa2q.img` to the partition** — never
-> extract the tar into a hand-made filesystem.
-
----
-
 ## Safety net for module testing (never Download-mode again)
 
 `msm_drm` auto-loads at boot from **`/etc/modules`** *and* via **udev coldplug**
@@ -592,8 +509,6 @@ CPU busy and cooked the phone to 71 °C once.
 
 ## Credits & caveats
 
-- **ReSukiSU/SuSFS version ceiling:** cannot update past `03b60f26` without bumping
-  the in-tree SuSFS; the working pin is `b2ac2fc8`.
 - The `gh_wdt_tame` and `splashcon` drivers are **bring-up aids**, not shipping
   configuration. A device with no working watchdog cannot self-recover from a hang.
 - Everything here is specific to pa2q / SM8750. The compiled-in framebuffer
