@@ -14,24 +14,17 @@ here under [`kernel/`](kernel/) so the whole picture is in one place.
 
 ## Status at a glance
 
-| Area | State |
-|---|---|
-| Dual-boot Android ⇄ pmOS (one-command switch) | ✅ working |
-| pmOS boots on internal storage, reaches SSH | ✅ working |
-| Serial earlycon (UART jig) | ✅ documented, gated on hardware jig |
-| Boot-splash console (no UART needed) | ✅ working |
-| Gunyah hypervisor watchdog tamed | ✅ working (required for boot) |
-| Wi-Fi | ✅ working |
-| Audio — speaker (AudioReach/AGM, TAS25xx protection) | ✅ working, card up ~40 s into boot |
-| Audio - desktop (PipeWire "Speaker" sink -> vendor agmplay bridge) | working, verified by ear |
-| Bluetooth | NOT working: `btattach` with the chip off hangs the SoC (see Bluetooth notes) |
-| SYSVIPC + namespaces (Android side, containers/chroot) | ✅ working |
-| Display — Plasma (KWin, Wayland) on the panel | ✅ working: autologin, adopts the bootloader cont-splash |
-| GPU — KWin composites on the Adreno 830 | ✅ OpenGL ES 3.2 via zink → turnip (KGSL) |
-| Display - DPMS off/on (screen off, wake) | working since 2026-10-31: needs `debugcc_sun` in /etc/modules (see below) |
-
-Still missing: Bluetooth, sensors (auto-rotate), cellular, camera. Plasma is
-usable day to day: display, GPU, audio, Wi-Fi, touch, screen off/on.
+- Dual-boot Android <-> pmOS - yes, one command or one icon
+- Wi-Fi - yes
+- Display - yes, KDE Plasma (Wayland), autologin, screen off/on works (needs `debugcc_sun`, see below)
+- GPU - yes, Adreno 830 via turnip (KGSL), OpenGL ES 3.2 via zink
+- Audio - speaker yes (vendor AGM bridge to a PipeWire sink)
+- USB dock - yes, but no HDMI
+- Charging - yes, full support
+- Boot splash - yes, spinning pmOS logo, no UART needed
+- Bluetooth - no (`btattach` with the chip off hangs the SoC)
+- Sensors / auto-rotate - no (4-finger double tap rotates)
+- Cellular, camera - no
 
 ---
 
