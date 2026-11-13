@@ -1,0 +1,45 @@
+#!/bin/sh
+# Back to Android: VOLUME-UP held at boot, or automatically after a boot that
+# never finished (pa2q-boot-ok.service never ran). systemd port of the OpenRC
+# bootkey-recovery service. Also keeps a boot trace in /var/log until the boot
+# is confirmed, and lets the watchdog reset a phone that hangs past DEADLINE.
+FAILS=/var/lib/dualboot/bootfails
+DEADLINE=240
+TRACE=/var/log/boot-trace.log
+
+to_android() {
+	echo "<2>bootkey-recovery: $1 -> switching to Android" > /dev/kmsg
+	echo 0 > "$FAILS"; sync
+	/usr/local/bin/boot-switch android
+	echo "<2>bootkey-recovery: boot-switch android failed - continuing" > /dev/kmsg
+}
+
+trace() {
+	[ -f $TRACE ] && mv -f $TRACE $TRACE.prev
+	: > /var/log/boot-timeline.log
+	while [ ! -e /run/pmos-boot-ok ]; do
+		{ echo "uptime $(cut -d' ' -f1 /proc/uptime)"
+		  systemctl list-jobs --no-pager 2>&1
+		  dmesg
+		} > $TRACE.tmp 2>&1
+		mv -f $TRACE.tmp $TRACE; sync
+		echo "$(cut -d' ' -f1 /proc/uptime) $(systemctl list-jobs --no-legend 2>/dev/null | awk '{print $2}' | tr '\n' ' ')" >> /var/log/boot-timeline.log
+		up=$(cut -d. -f1 /proc/uptime)
+		if [ "$up" -ge $DEADLINE ] && [ ! -e /etc/pmos-no-deadline ]; then
+			echo "<2>bootkey-recovery: boot not confirmed by ${DEADLINE}s - letting the watchdog reset the phone" > /dev/kmsg
+			echo 0 > /sys/module/gh_wdt_tame/parameters/pet
+			DEADLINE=999999
+		fi
+		sleep 2
+	done
+}
+
+mkdir -p "${FAILS%/*}"
+/usr/local/bin/bootkey-recovery
+[ $? -eq 10 ] && to_android "VOLUME-UP held"
+n=$(cat "$FAILS" 2>/dev/null)
+case "$n" in ''|*[!0-9]*) n=0 ;; esac
+[ "$n" -ge 1 ] && to_android "the last boot never finished"
+echo $((n + 1)) > "$FAILS"; sync
+trace >/dev/null 2>&1 &
+exit 0

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="boot_pmos"
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/boot_short"
+        android:shortcutLongLabel="@string/boot_long">
+        <intent
+            android:action="org.pa2q.manager.BOOT"
+            android:targetPackage="org.pa2q.manager"
+            android:targetClass="org.pa2q.manager.MainActivity" />
+    </shortcut>
+</shortcuts>

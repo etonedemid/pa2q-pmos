@@ -1,0 +1,13 @@
+[Unit]
+Description=Attach the Bluetooth controller
+After=local-fs.target
+Before=bluetooth.service
+
+[Service]
+ExecStartPre=/usr/bin/modprobe -a btpower msm_geni_serial hci_uart
+ExecStart=/usr/local/bin/pa2q-bt
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

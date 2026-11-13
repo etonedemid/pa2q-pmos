@@ -18,10 +18,10 @@ here under [`kernel/`](kernel/) so the whole picture is in one place.
 - Display - yes, KDE Plasma (Wayland), autologin, screen off/on works (needs `debugcc_sun`, see below)
 - GPU - yes, Adreno 830 via turnip (KGSL), OpenGL ES 3.2 via zink
 - Audio - speaker yes (vendor AGM bridge to a PipeWire sink)
-- USB dock - yes, but no HDMI
+- USB dock - yes, HDMI too in gaming mode: plug and play, TV resolution, TV sound, touch off while docked (see below)
 - Charging - yes, full support
-- Boot splash - yes, spinning pmOS logo, no UART needed
-- Bluetooth - no (`btattach` with the chip off hangs the SoC)
+- Boot log - yes, scrolling kernel log on the panel (splashcon), then the journal on DRM (device/pa2q-bootlog) until SDDM; no UART needed
+- Bluetooth - yes (`pa2q-bt`, see below)
 - Sensors / auto-rotate - no (4-finger double tap rotates)
 - Cellular, camera - no
 
@@ -34,7 +34,7 @@ kernel/          pmOS-specific kernel additions + build recipes
   build-local.sh            stock-config kernel build (24-core host)
   build-pmos-local.sh       pmOS-config kernel build (rdinit, VT, devtmpfs, splash)
   build-698-ns.sh           k698 GKI "module-friendly" build (the running kernel)
-  splashcon.c / _logo.h     boot-splash console (renders into cont-splash FB)
+  splashcon.c               kernel log on the panel before msm_drm (cont-splash FB)
   gh_wdt_tame.c             tame the Gunyah hypervisor watchdog (SMCCC)
   EARLYCON.md               serial console bring-up over the USB-C debug UART
   kconfig-hooks.diff        the in-tree Kconfig/Makefile hooks for the above
@@ -57,6 +57,7 @@ device/          on-device tools
   pa2q-rotate-gesture       4-finger double tap rotates the screen
   pa2q-gamepad-desktop      gamepad as mouse/keys in Plasma
   dispcap                   capture the panel framebuffer
+  00-pa2q-no-passwords.conf sshd drop-in: key logins only
 ```
 
 ---
@@ -75,6 +76,18 @@ device/          on-device tools
   `dtbo_a`=sda36, **`pmOS_root`=sda60**.
 - **USB networking (pmOS):** CDC-NCM gadget, device `172.16.42.1`, host
   `172.16.42.2/24`. SSH in as `root`.
+- **SSH hardening:** turn off password logins and update openssh, because of the
+  [musl password bypass](https://alpinelinux.org/posts/2026-11-05-openssh-password-authentication-bypass/)
+  (fixed in Alpine edge `10.6_p2-r0`). Your key must already be in
+  `/root/.ssh/authorized_keys`. This updates only openssh, not the whole edge
+  system:
+
+  ```sh
+  scp device/00-pa2q-no-passwords.conf root@172.16.42.1:/etc/ssh/sshd_config.d/
+  ssh root@172.16.42.1 'apk upgrade -U $(apk info | grep ^openssh); sshd -t && rc-service sshd restart; sshd -T | grep -E "^(usepam|passwordauthentication) "'
+  ```
+
+  The last command should print `passwordauthentication no`.
 
 ### Boot
 
@@ -208,17 +221,66 @@ runlevel so the two stacks don't fight over the DSP.
   default 64 KiB pipes the never-suspending sink kept them full and audio lagged
   by up to ~0.7 s.
 
-### Bluetooth - not working yet; don't power the chip off before `btattach`
+### HDMI / USB-C docks - picture works (2026-11-08)
 
-BT is a WCN7850-class "kiwi" on `ttyHS5` (`a9c000.qcom,qup_hsuart`), powered
-by `btpower` (`soc:bt_kiwi`; loading it auto-powers the chip via rfkill).
-Firmware `hmtbtfw20.tlv`/`hmtnv20.bin` is in `/lib/firmware/qca`.
-**Attaching `hci_uart` with the chip powered off hangs the SoC**: the dead
-chip holds RX low, `msm_geni_serial` loops in an IRQ storm on CPU0
-(`geni_se_dump_dbg_regs ... geni_ios:0x0`), and the watchdog keeps getting
-petted from the other CPUs, so it needs a manual Vol-Down+Power reset. The old
-`pmos-bt-up.sh` does exactly that (power off -> `btattach`); don't run it.
+The kernel side always worked (alt mode via max77775, link training, HPD).
+What blocked it: the bootloader's cmdline carries `video=DP-1:d`, which makes
+DRM force DP-1 off. Probes always say "disconnected" and `drm_get_edid()`
+returns nothing, so even a forced mode came up as 640x480 failsafe.
+`sde-no-panic` now writes `detect` to `/sys/class/drm/card0-DP-1/status` at
+boot, which clears the force. Gamescope 3.17 then switches by itself: plug a
+dock and it moves to the TV at its EDID mode, unplug and it goes back to DSI-1.
+Tested with a Nintendo Switch dock (057e:2003) on a Philips TV at 1080p60.
 
+Docked mode, in `pa2q-gamescope-session` (polls DP-1 every 2 s):
+- Gamescope keeps rendering at the phone's 1560x720 on the TV (letterboxed, a
+  phone-shaped picture); Steam never asks for the TV size. The loop sets
+  `GAMESCOPE_XWAYLAND_MODE_CONTROL` to the TV's preferred mode, and back to
+  1560x720 on unplug.
+- `pa2q-touch-rotate dock|undock` sets the touchscreen's input `inhibited`.
+
+Unity games minimize (a 160x34 box in the corner) when the Steam guide opens:
+Proton hides that focus loss only when Steam's gameoverlayrenderer.so is loaded,
+and there is none for ARM. Launch option `WINE_IGNORE_FOCUS_HACK=1 %command%`
+fixes it (set for Slime Rancher, 2026-11-08).
+
+TV sound, in `pa2q-speaker-bridge`: while DP-1 is connected agmplay plays the
+Speaker sink on `DISPLAY_PORT-RX-0` (DEVICERX HDMI_RX 0xA2000006, backend 24-bit
+S24_3LE in the backend_conf overlay) instead of the speaker; a plug/unplug
+kills agmplay and the loop restarts it on the other backend. The vendor
+agmplay has no DisplayPort code, so it never sends
+`PARAM_ID_DISPLAY_PORT_INTF_CFG` and the DSP fails `graph_start` (-131, seen
+through a logdw socket in the chroot). [`device/pa2q-dp-shim.c`](device/pa2q-dp-shim.c),
+LD_PRELOADed from `/opt/adroot/pa2q-dp-shim.so`, sends it before `pcm_open`
+with the vendor libagmmixer's own helpers (build line in the file; Android
+clang from `toolchains/`, no NDK).
+
+### Bluetooth - works (2026-11-08)
+
+BT is a WCN7850-class "kiwi" on **`ttyHS0`** (`898000.qcom,qup_uart`, the
+4-wire UART with a wakeup byte). `ttyHS5` (`a9c000`) is an unrelated 2-wire
+port. `btpower` (`soc:bt_kiwi`) powers the chip; firmware is
+`hmtbtfw20.tlv`/`hmtnv20.bin` (board ID 0) in `/lib/firmware/qca`.
+[`device/pa2q-bt`](device/pa2q-bt) (OpenRC service `pa2q-bt`, before
+`bluetooth`) does the bring-up:
+
+- The DT has no serdev node, so `btattach -P qca` is the only path. `hci_qca`
+  needed two no-serdev fixes in `drivers/bluetooth/hci_qca.c`: chip type
+  WCN7850, and a NULL `serdev` dereference in `qca_setup()`. That oops, with
+  `panic_on_oops=1`, was the old "attaching hangs the SoC" (it was a panic and
+  watchdog reboot, not the chip being off). Oper speed is 3.2M like Samsung's NVM.
+- It holds the `msm_geni_serial` clock vote (ioctl `0x54ED`, as Android's HAL
+  does). Without it the port autosuspends while the chip applies the NVM and
+  the last NVM ack is lost (`QCA Failed to download NVM (-110)`).
+- It power-cycles the chip via the `bt_power` rfkill first, so it starts in
+  ROM at 115200.
+- It sets the public address from EFS (`efs` partition,
+  `bluetooth/bt_addr`, read-only mount). The NVM only has a placeholder, and
+  without it the controller stays "unconfigured" (not in `btmgmt info`).
+
+Rebuild the module: `make O=out-698ns ... M=drivers/bluetooth
+KBUILD_EXTRA_SYMBOLS=$PWD/out-698ns/net/bluetooth/Module.symvers modules` in
+`k698` (same flags as `kernel/build-local.sh`).
 
 ---
 
@@ -385,6 +447,20 @@ writable registry. **Never read every file in `/sys/devices/soc0/`** - Samsung's
 `crash` attribute there panics the phone on read.
 
 ## Crash recovery - kwin, plasmashell, session
+
+Never upgrade only part of Plasma: pmOS tracks Alpine edge, and `apk add -u
+<pkg>` can pull a new `kscreenlocker` while `kwin` stays old. On 2026-11-05 that
+left `libkwin.so.6` with unresolved `ScreenLocker::KSldApp` symbols, so kwin
+died at once and SDDM's `Relogin=true` restarted the session every ~2 s: a black
+screen that looks like a boot hang, with SSH still fine. The log to read is
+`~/.local/share/sddm/wayland-session.log`; the fix was `apk add -u kwin
+kscreenlocker`.
+
+The same upgrade left `networkmanager-wifi` on 1.58.1 and `networkmanager` on
+1.58.0. Plugins load from a versioned directory, so the daemon never found the
+Wi-Fi plugin and `nmcli` showed `wifi-hw: missing` with the driver up. With no
+network, fetch the matching packages on another machine and `apk add
+--no-network *.apk` them over USB.
 
 kwin still crashes now and then, seemingly at random but often while media
 plays (no message before it dies). Recovery is automatic at three levels:

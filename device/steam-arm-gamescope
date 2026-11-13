@@ -20,5 +20,13 @@ export STEAM_ARM_DEVICE=${STEAM_ARM_DEVICE:--steamdeck}
 # runs 16:9 with black bars. Touch mode 4 = direct touch, like DroidDeck.
 W=${STEAM_GAMESCOPE_W:-1560}
 H=${STEAM_GAMESCOPE_H:-720}
+# --desktop: Steam's normal desktop window in that same nested X server.
+if [ "${1:-}" = --desktop ]; then
+	shift
+	ui="-nobigpicture"
+else
+	ui="-gamepadui -steamdeck -steamos3"
+	export STEAM_GAMESCOPE_NIS_SUPPORTED=1 STEAM_GAMESCOPE_FANCY_SCALING_SUPPORT=1
+fi
 exec gamescope --backend wayland -f -e -W "$W" -H "$H" -w "$W" -h "$H" \
-	--default-touch-mode 4 -- /usr/local/bin/steam-arm --bigpicture -usepipewireaudio "$@"
+	--default-touch-mode 4 -- /usr/local/bin/steam-arm $ui -no-cef-sandbox -usepipewireaudio "$@"

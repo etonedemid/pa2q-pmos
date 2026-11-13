@@ -1,0 +1,13 @@
+#!/bin/sh
+# Decky Loader inside the Steam container (the official arm64 build wants glibc).
+# Started by steam-arm; it stays up across Steam restarts and reconnects by itself.
+H=/home/etonedemid
+export HOME=$H DECKY_USER=etonedemid UNPRIVILEGED_USER=etonedemid
+export UNPRIVILEGED_PATH=$H/homebrew PRIVILEGED_PATH=$H/homebrew DECKY_HOME=$H/homebrew LOG_LEVEL=INFO
+# Hot reload is for plugin developers; here it looped on plugin events and starved the
+# loader (150 log lines a second, its UI never injected).
+export LIVE_RELOAD=0
+unset LD_LIBRARY_PATH LD_PRELOAD
+cd "$H/homebrew/services" || exit 1
+# Wait: on a Steam restart the old loader still holds the lock for a few seconds.
+exec flock -w 60 /tmp/pa2q-decky.lock sh -c 'while :; do ./PluginLoader >> PluginLoader.log 2>&1; sleep 5; done'

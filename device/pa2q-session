@@ -23,4 +23,8 @@ if [ "$(cat "$F" 2>/dev/null)" = gamescope ]; then
 	[ $(($(date +%s) - start)) -lt 30 ] && echo plasma > "$F"
 	exit 0
 fi
-exec /usr/lib/libexec/plasma-dbus-run-session-if-needed /usr/bin/startplasma-wayland
+# pmOS/Alpine keep it in libexec, Arch in /usr/lib.
+for r in /usr/lib/plasma-dbus-run-session-if-needed /usr/lib/libexec/plasma-dbus-run-session-if-needed; do
+	[ -x "$r" ] && exec "$r" /usr/bin/startplasma-wayland
+done
+exec dbus-run-session /usr/bin/startplasma-wayland

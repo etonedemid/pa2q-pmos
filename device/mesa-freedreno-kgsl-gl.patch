@@ -1,0 +1,878 @@
+diff --git a/src/freedreno/drm/freedreno_device.c b/src/freedreno/drm/freedreno_device.c
+index 6c64e64..9ea19b0 100644
+--- a/src/freedreno/drm/freedreno_device.c
++++ b/src/freedreno/drm/freedreno_device.c
+@@ -23,6 +23,9 @@ struct fd_device *msm_device_new(int fd, drmVersionPtr version);
+ #ifdef HAVE_FREEDRENO_VIRTIO
+ struct fd_device *virtio_device_new(int fd, drmVersionPtr version);
+ #endif
++#ifdef HAVE_FREEDRENO_KGSL
++struct fd_device *kgsl_device_new(int fd);
++#endif
+ 
+ uint64_t os_page_size = 4096;
+ 
+@@ -38,6 +41,14 @@ fd_device_new(int fd)
+    /* figure out if we are kgsl or msm drm driver: */
+    version = drmGetVersion(fd);
+    if (!version) {
++#ifdef HAVE_FREEDRENO_KGSL
++      /* not DRM: KGSL (downstream Qualcomm kernels) */
++      dev = kgsl_device_new(fd);
++      if (dev) {
++         DEBUG_MSG("kgsl device");
++         goto out;
++      }
++#endif
+       ERROR_MSG("cannot get version: %s", strerror(errno));
+       return NULL;
+    }
+@@ -65,11 +76,6 @@ fd_device_new(int fd)
+        * extra guest<->host round trips associated with pipe creation:
+        */
+       use_heap = true;
+-#endif
+-#if HAVE_FREEDRENO_KGSL
+-   } else if (!strcmp(version->name, "kgsl")) {
+-      DEBUG_MSG("kgsl DRM device");
+-      dev = kgsl_device_new(fd);
+ #endif
+    }
+ 
+@@ -79,7 +85,8 @@ fd_device_new(int fd)
+    }
+ 
+ out:
+-   drmFreeVersion(version);
++   if (version)
++      drmFreeVersion(version);
+ 
+    if (!dev)
+       return NULL;
+@@ -102,7 +109,7 @@ out:
+    simple_mtx_init(&dev->submit_lock, mtx_plain);
+    simple_mtx_init(&dev->suballoc_lock, mtx_plain);
+ 
+-   if (!use_heap) {
++   if (!use_heap && version) {
+       struct fd_pipe *pipe = fd_pipe_new(dev, FD_PIPE_3D);
+ 
+       if (!pipe)
+diff --git a/src/freedreno/drm/kgsl/kgsl_bo.c b/src/freedreno/drm/kgsl/kgsl_bo.c
+new file mode 100644
+index 0000000..830638c
+--- /dev/null
++++ b/src/freedreno/drm/kgsl/kgsl_bo.c
+@@ -0,0 +1,248 @@
++/*
++ * SPDX-License-Identifier: MIT
++ */
++
++#include <errno.h>
++#include <fcntl.h>
++#include <sys/stat.h>
++#include <unistd.h>
++#include <linux/dma-heap.h>
++
++#include "util/os_file.h"
++#include "util/os_mman.h"
++
++#include "kgsl_priv.h"
++
++static uint64_t
++kgsl_bo_iova(struct fd_bo *bo)
++{
++   return to_kgsl_bo(bo)->iova;
++}
++
++static void
++kgsl_bo_set_name(struct fd_bo *bo, const char *fmt, va_list ap)
++{
++}
++
++static int
++kgsl_bo_offset(struct fd_bo *bo, uint64_t *offset)
++{
++   /* mmap offset of a KGSL allocation is its id << 12 (as in turnip) */
++   *offset = (uint64_t)bo->handle << 12;
++   return 0;
++}
++
++static int
++kgsl_bo_madvise(struct fd_bo *bo, int willneed)
++{
++   return willneed;
++}
++
++static int
++kgsl_bo_cpu_prep(struct fd_bo *bo, struct fd_pipe *pipe, uint32_t op)
++{
++   /* No implicit sync on KGSL; our own fences were already waited on. */
++   return 0;
++}
++
++static void *
++kgsl_bo_map(struct fd_bo *bo)
++{
++   struct kgsl_bo *kgsl_bo = to_kgsl_bo(bo);
++
++   if (kgsl_bo->shared_fd >= 0)
++      return os_mmap(0, bo->size, PROT_READ | PROT_WRITE, MAP_SHARED,
++                     kgsl_bo->shared_fd, 0);
++
++   return fd_bo_map_os_mmap(bo);
++}
++
++static int
++kgsl_bo_dmabuf(struct fd_bo *bo)
++{
++   struct kgsl_bo *kgsl_bo = to_kgsl_bo(bo);
++
++   if (kgsl_bo->shared_fd < 0) {
++      ERROR_MSG("KGSL BO %u was not allocated shareable", bo->handle);
++      return -EINVAL;
++   }
++   return os_dupfd_cloexec(kgsl_bo->shared_fd);
++}
++
++void
++kgsl_bo_close_handle(struct fd_bo *bo)
++{
++   struct kgsl_gpumem_free_id req = {
++      .id = bo->handle,
++   };
++
++   kgsl_safe_ioctl(bo->dev->fd, IOCTL_KGSL_GPUMEM_FREE_ID, &req);
++}
++
++static void
++kgsl_bo_destroy(struct fd_bo *bo)
++{
++   struct kgsl_bo *kgsl_bo = to_kgsl_bo(bo);
++
++   /* KGSL frees the memory as soon as the id is freed and takes no
++    * reference for buffers a submit merely uses (msm does), so the GPU
++    * must be done with it first.
++    */
++   for (unsigned i = 0; i < bo->nr_fences; i++)
++      fd_fence_wait(bo->fences[i]);
++
++   if (kgsl_bo->shared_fd >= 0)
++      close(kgsl_bo->shared_fd);
++
++   fd_bo_fini_common(bo);
++}
++
++static const struct fd_bo_funcs bo_funcs = {
++   .offset = kgsl_bo_offset,
++   .map = kgsl_bo_map,
++   .cpu_prep = kgsl_bo_cpu_prep,
++   .madvise = kgsl_bo_madvise,
++   .iova = kgsl_bo_iova,
++   .set_name = kgsl_bo_set_name,
++   .dmabuf = kgsl_bo_dmabuf,
++   .destroy = kgsl_bo_destroy,
++};
++
++/* Wrap an existing KGSL allocation id. Size comes from the kernel. */
++struct fd_bo *
++kgsl_bo_from_handle(struct fd_device *dev, uint32_t size, uint32_t handle)
++{
++   struct kgsl_gpuobj_info req = {
++      .id = handle,
++   };
++
++   if (kgsl_safe_ioctl(dev->fd, IOCTL_KGSL_GPUOBJ_INFO, &req)) {
++      ERROR_MSG("GPUOBJ_INFO failed for %u (%s)", handle, strerror(errno));
++      return NULL;
++   }
++
++   struct kgsl_bo *kgsl_bo = calloc(1, sizeof(*kgsl_bo));
++   if (!kgsl_bo)
++      return NULL;
++
++   struct fd_bo *bo = &kgsl_bo->base;
++   bo->size = req.size;
++   bo->handle = req.id;
++   bo->funcs = &bo_funcs;
++   kgsl_bo->iova = req.gpuaddr;
++   kgsl_bo->shared_fd = -1;
++
++   fd_bo_init_common(bo, dev);
++
++   return bo;
++}
++
++/* Import a dma-buf. @fd stays the caller's; the BO keeps its own dup. */
++static struct fd_bo *
++kgsl_bo_import(struct fd_device *dev, int fd)
++{
++   struct kgsl_gpuobj_import_dma_buf import_dmabuf = {
++      .fd = fd,
++   };
++   struct kgsl_gpuobj_import req = {
++      .priv = (uintptr_t)&import_dmabuf,
++      .priv_len = sizeof(import_dmabuf),
++      .flags = 0,
++      .type = KGSL_USER_MEM_TYPE_DMABUF,
++   };
++
++   if (kgsl_safe_ioctl(dev->fd, IOCTL_KGSL_GPUOBJ_IMPORT, &req)) {
++      ERROR_MSG("GPUOBJ_IMPORT failed (%s)", strerror(errno));
++      return NULL;
++   }
++
++   struct fd_bo *bo = kgsl_bo_from_handle(dev, 0, req.id);
++   if (!bo) {
++      struct kgsl_gpumem_free_id free_req = { .id = req.id };
++      kgsl_safe_ioctl(dev->fd, IOCTL_KGSL_GPUMEM_FREE_ID, &free_req);
++      return NULL;
++   }
++
++   to_kgsl_bo(bo)->shared_fd = os_dupfd_cloexec(fd);
++   return bo;
++}
++
++struct fd_bo *
++kgsl_bo_from_dmabuf(struct fd_device *dev, int fd)
++{
++   /* ponytail: no dedup of a dma-buf imported twice (msm dedups by GEM
++    * handle); two fd_bo's then share the memory, which is harmless here.
++    */
++   struct fd_bo *bo = kgsl_bo_import(dev, fd);
++   if (!bo)
++      return NULL;
++
++   bo->alloc_flags |= FD_BO_SHARED;
++
++   simple_mtx_lock(&table_lock);
++   _mesa_hash_table_insert(dev->handle_table, &bo->handle, bo);
++   simple_mtx_unlock(&table_lock);
++
++   return bo;
++}
++
++struct fd_bo *
++kgsl_bo_new(struct fd_device *dev, uint32_t size, uint32_t flags)
++{
++   struct kgsl_device *kgsl_dev = to_kgsl_device(dev);
++
++   /* Shareable: back it with a dma-buf so it can be exported (KGSL has
++    * no export for its own allocations).
++    */
++   if ((flags & (FD_BO_SHARED | FD_BO_SCANOUT)) && kgsl_dev->dma_heap_fd >= 0) {
++      struct dma_heap_allocation_data alloc = {
++         .len = size,
++         .fd_flags = O_RDWR | O_CLOEXEC,
++      };
++
++      if (kgsl_safe_ioctl(kgsl_dev->dma_heap_fd, DMA_HEAP_IOCTL_ALLOC, &alloc)) {
++         ERROR_MSG("DMA_HEAP_IOCTL_ALLOC failed (%s)", strerror(errno));
++         return NULL;
++      }
++
++      struct fd_bo *bo = kgsl_bo_import(dev, alloc.fd);
++      close(alloc.fd);
++      return bo;
++   }
++
++   struct kgsl_gpumem_alloc_id req = {
++      .size = size,
++   };
++
++   if (flags & FD_BO_CACHED_COHERENT)
++      req.flags |= KGSL_MEMFLAGS_IOCOHERENT |
++                   (KGSL_CACHEMODE_WRITEBACK << KGSL_CACHEMODE_SHIFT);
++   else
++      req.flags |= KGSL_CACHEMODE_WRITECOMBINE << KGSL_CACHEMODE_SHIFT;
++
++   if (flags & FD_BO_GPUREADONLY)
++      req.flags |= KGSL_MEMFLAGS_GPUREADONLY;
++
++   if (kgsl_safe_ioctl(dev->fd, IOCTL_KGSL_GPUMEM_ALLOC_ID, &req)) {
++      ERROR_MSG("GPUMEM_ALLOC_ID failed (%s)", strerror(errno));
++      return NULL;
++   }
++
++   struct kgsl_bo *kgsl_bo = calloc(1, sizeof(*kgsl_bo));
++   if (!kgsl_bo) {
++      struct kgsl_gpumem_free_id free_req = { .id = req.id };
++      kgsl_safe_ioctl(dev->fd, IOCTL_KGSL_GPUMEM_FREE_ID, &free_req);
++      return NULL;
++   }
++
++   struct fd_bo *bo = &kgsl_bo->base;
++   bo->size = req.mmapsize;
++   bo->handle = req.id;
++   bo->funcs = &bo_funcs;
++   kgsl_bo->iova = req.gpuaddr;
++   kgsl_bo->shared_fd = -1;
++
++   fd_bo_init_common(bo, dev);
++
++   return bo;
++}
+diff --git a/src/freedreno/drm/kgsl/kgsl_device.c b/src/freedreno/drm/kgsl/kgsl_device.c
+new file mode 100644
+index 0000000..f849107
+--- /dev/null
++++ b/src/freedreno/drm/kgsl/kgsl_device.c
+@@ -0,0 +1,102 @@
++/*
++ * SPDX-License-Identifier: MIT
++ */
++
++#include <errno.h>
++#include <fcntl.h>
++#include <sys/ioctl.h>
++#include <unistd.h>
++
++#include "kgsl_priv.h"
++
++int
++kgsl_safe_ioctl(int fd, unsigned long request, void *arg)
++{
++   int ret;
++
++   do {
++      ret = ioctl(fd, request, arg);
++   } while (ret == -1 && (errno == EINTR || errno == EAGAIN));
++
++   return ret;
++}
++
++int
++kgsl_get_prop(int fd, unsigned int type, void *value, size_t size)
++{
++   struct kgsl_device_getproperty getprop = {
++      .type = type,
++      .value = value,
++      .sizebytes = size,
++   };
++
++   return kgsl_safe_ioctl(fd, IOCTL_KGSL_DEVICE_GETPROPERTY, &getprop);
++}
++
++static void
++kgsl_device_destroy(struct fd_device *dev)
++{
++   struct kgsl_device *kgsl_dev = to_kgsl_device(dev);
++
++   if (kgsl_dev->dma_heap_fd >= 0)
++      close(kgsl_dev->dma_heap_fd);
++}
++
++static const struct fd_device_funcs funcs = {
++   .bo_new = kgsl_bo_new,
++   .bo_from_handle = kgsl_bo_from_handle,
++   .bo_from_dmabuf = kgsl_bo_from_dmabuf,
++   .bo_close_handle = kgsl_bo_close_handle,
++   .pipe_new = kgsl_pipe_new,
++   .destroy = kgsl_device_destroy,
++};
++
++/* Same probe as turnip: allocate and free a tiny BO with these flags. */
++static bool
++kgsl_memory_type_supported(int fd, uint32_t flags)
++{
++   struct kgsl_gpumem_alloc_id req = {
++      .size = 4096,
++      .flags = flags,
++   };
++
++   if (kgsl_safe_ioctl(fd, IOCTL_KGSL_GPUMEM_ALLOC_ID, &req))
++      return false;
++
++   struct kgsl_gpumem_free_id req_free = { .id = req.id };
++   kgsl_safe_ioctl(fd, IOCTL_KGSL_GPUMEM_FREE_ID, &req_free);
++   return true;
++}
++
++struct fd_device *
++kgsl_device_new(int fd)
++{
++   struct kgsl_devinfo info;
++
++   /* Not a KGSL fd if this fails. */
++   if (kgsl_get_prop(fd, KGSL_PROP_DEVICE_INFO, &info, sizeof(info)))
++      return NULL;
++
++   struct kgsl_device *kgsl_dev = calloc(1, sizeof(*kgsl_dev));
++   if (!kgsl_dev)
++      return NULL;
++
++   struct fd_device *dev = &kgsl_dev->base;
++   dev->funcs = &funcs;
++   dev->fd = fd;
++   /* Highest level: the params it gates are answered by kgsl_pipe. */
++   dev->version = FD_VERSION_VA_SIZE;
++   dev->bo_size = sizeof(struct kgsl_bo);
++   dev->has_cached_coherent = kgsl_memory_type_supported(
++      fd, KGSL_MEMFLAGS_IOCOHERENT |
++             (KGSL_CACHEMODE_WRITEBACK << KGSL_CACHEMODE_SHIFT));
++
++   kgsl_dev->dma_heap_fd = open("/dev/dma_heap/system", O_RDONLY | O_CLOEXEC);
++   if (kgsl_dev->dma_heap_fd < 0)
++      WARN_MSG("no /dev/dma_heap/system: buffers cannot be exported");
++
++   /* async submit queue used for deferred submits, like msm */
++   util_queue_init(&dev->submit_queue, "sq", 8, 1, 0, NULL);
++
++   return dev;
++}
+diff --git a/src/freedreno/drm/kgsl/kgsl_pipe.c b/src/freedreno/drm/kgsl/kgsl_pipe.c
+new file mode 100644
+index 0000000..0960900
+--- /dev/null
++++ b/src/freedreno/drm/kgsl/kgsl_pipe.c
+@@ -0,0 +1,175 @@
++/*
++ * SPDX-License-Identifier: MIT
++ */
++
++#include <errno.h>
++#include <limits.h>
++#include <sys/ioctl.h>
++
++#include "util/os_time.h"
++
++#include "freedreno_ringbuffer_sp.h"
++#include "kgsl_priv.h"
++
++static int
++kgsl_pipe_get_param(struct fd_pipe *pipe, enum fd_param_id param,
++                    uint64_t *value)
++{
++   struct kgsl_pipe *kgsl_pipe = to_kgsl_pipe(pipe);
++
++   switch (param) {
++   case FD_DEVICE_ID:
++   case FD_GPU_ID:
++      *value = kgsl_pipe->gpu_id;
++      return 0;
++   case FD_CHIP_ID:
++      *value = kgsl_pipe->chip_id;
++      return 0;
++   case FD_GMEM_SIZE:
++      *value = kgsl_pipe->gmem_size;
++      return 0;
++   case FD_GMEM_BASE:
++      *value = kgsl_pipe->gmem_base;
++      return 0;
++   case FD_NR_PRIORITIES:
++      /* one context priority; prio is ignored */
++      *value = 1;
++      return 0;
++   case FD_CTX_FAULTS:
++   case FD_GLOBAL_FAULTS:
++   case FD_SUSPEND_COUNT:
++      /* ponytail: no reset/suspend reporting, robustness never sees one */
++      *value = 0;
++      return 0;
++   case FD_VA_SIZE:
++      if (!kgsl_pipe->va_size)
++         return -1;
++      *value = kgsl_pipe->va_size;
++      return 0;
++   case FD_UCHE_TRAP_BASE:
++      *value = kgsl_pipe->uche_trap_base;
++      return 0;
++   case FD_MAX_FREQ:
++   case FD_TIMESTAMP:
++      /* not available: perf queries limited, timestamps from the CPU */
++      return -1;
++   default:
++      ERROR_MSG("invalid param id: %d", param);
++      return -1;
++   }
++}
++
++static int
++kgsl_pipe_set_param(struct fd_pipe *pipe, enum fd_param_id param,
++                    uint64_t value)
++{
++   return -1;
++}
++
++/* Restarted waits keep the deadline instead of starting over (turnip). */
++static int
++kgsl_pipe_wait(struct fd_pipe *pipe, const struct fd_fence *fence,
++               uint64_t timeout_ns)
++{
++   struct kgsl_pipe *kgsl_pipe = to_kgsl_pipe(pipe);
++   int64_t timeout_ms = timeout_ns / 1000000;
++   if (timeout_ns != 0 && timeout_ms == 0)
++      timeout_ms = 1;
++   if (timeout_ms > UINT_MAX)
++      timeout_ms = UINT_MAX;
++
++   struct kgsl_device_waittimestamp_ctxtid wait = {
++      .context_id = kgsl_pipe->queue_id,
++      .timestamp = fence->kfence,
++      .timeout = timeout_ms,
++   };
++   int64_t start = os_time_get_nano();
++
++   while (true) {
++      int ret = ioctl(pipe->dev->fd, IOCTL_KGSL_DEVICE_WAITTIMESTAMP_CTXTID,
++                      &wait);
++      if (ret == 0)
++         return 0;
++      if (errno != EINTR && errno != EAGAIN)
++         return errno == ETIMEDOUT || errno == ETIME ? -ETIMEDOUT : -errno;
++
++      int64_t now = os_time_get_nano();
++      timeout_ms -= (now - start) / 1000000;
++      start = now;
++      if (timeout_ms <= 0)
++         return -ETIMEDOUT;
++      wait.timeout = timeout_ms;
++   }
++}
++
++static void
++kgsl_pipe_destroy(struct fd_pipe *pipe)
++{
++   struct kgsl_pipe *kgsl_pipe = to_kgsl_pipe(pipe);
++   struct kgsl_drawctxt_destroy req = {
++      .drawctxt_id = kgsl_pipe->queue_id,
++   };
++
++   fd_pipe_sp_ringpool_fini(pipe);
++   kgsl_safe_ioctl(pipe->dev->fd, IOCTL_KGSL_DRAWCTXT_DESTROY, &req);
++   free(kgsl_pipe);
++}
++
++static const struct fd_pipe_funcs pipe_funcs = {
++   .ringbuffer_new_object = fd_ringbuffer_sp_new_object,
++   .submit_new = kgsl_submit_sp_new,
++   .flush = fd_pipe_sp_flush,
++   .get_param = kgsl_pipe_get_param,
++   .set_param = kgsl_pipe_set_param,
++   .wait = kgsl_pipe_wait,
++   .destroy = kgsl_pipe_destroy,
++};
++
++struct fd_pipe *
++kgsl_pipe_new(struct fd_device *dev, enum fd_pipe_id id, uint32_t prio)
++{
++   struct kgsl_devinfo info;
++   uint64_t gmem_iova;
++
++   if (kgsl_get_prop(dev->fd, KGSL_PROP_DEVICE_INFO, &info, sizeof(info)) ||
++       kgsl_get_prop(dev->fd, KGSL_PROP_UCHE_GMEM_VADDR, &gmem_iova,
++                     sizeof(gmem_iova)))
++      return NULL;
++
++   struct kgsl_pipe *kgsl_pipe = calloc(1, sizeof(*kgsl_pipe));
++   if (!kgsl_pipe)
++      return NULL;
++
++   struct fd_pipe *pipe = &kgsl_pipe->base;
++   pipe->dev = dev;
++   pipe->funcs = &pipe_funcs;
++
++   kgsl_pipe->gpu_id = ((info.chip_id >> 24) & 0xff) * 100 +
++                       ((info.chip_id >> 16) & 0xff) * 10 +
++                       ((info.chip_id >> 8) & 0xff);
++   kgsl_pipe->chip_id = info.chip_id;
++   kgsl_pipe->gmem_size = info.gmem_sizebytes;
++   kgsl_pipe->gmem_base = gmem_iova;
++   kgsl_get_prop(dev->fd, KGSL_PROP_GPU_VA64_SIZE, &kgsl_pipe->va_size,
++                 sizeof(kgsl_pipe->va_size));
++   if (kgsl_get_prop(dev->fd, KGSL_PROP_UCHE_TRAP_BASE,
++                     &kgsl_pipe->uche_trap_base,
++                     sizeof(kgsl_pipe->uche_trap_base)))
++      kgsl_pipe->uche_trap_base = 0x1fffffffff000ull; /* turnip's default */
++
++   struct kgsl_drawctxt_create req = {
++      .flags = KGSL_CONTEXT_SAVE_GMEM | KGSL_CONTEXT_NO_GMEM_ALLOC |
++               KGSL_CONTEXT_PREAMBLE,
++   };
++
++   if (kgsl_safe_ioctl(dev->fd, IOCTL_KGSL_DRAWCTXT_CREATE, &req)) {
++      ERROR_MSG("DRAWCTXT_CREATE failed (%s)", strerror(errno));
++      free(kgsl_pipe);
++      return NULL;
++   }
++   kgsl_pipe->queue_id = req.drawctxt_id;
++
++   fd_pipe_sp_ringpool_init(pipe);
++
++   return pipe;
++}
+diff --git a/src/freedreno/drm/kgsl/kgsl_priv.h b/src/freedreno/drm/kgsl/kgsl_priv.h
+new file mode 100644
+index 0000000..666f133
+--- /dev/null
++++ b/src/freedreno/drm/kgsl/kgsl_priv.h
+@@ -0,0 +1,59 @@
++/*
++ * KGSL (Qualcomm downstream kernel GPU driver) backend for libfreedreno_drm.
++ * Ported to current Mesa from Lucas Fryzek's MR 21570 (2023), plus dma-heap
++ * backed shareable BOs (as in tu_knl_kgsl.cc) so buffers can be exported.
++ *
++ * SPDX-License-Identifier: MIT
++ */
++
++#ifndef KGSL_PRIV_H
++#define KGSL_PRIV_H
++
++#include "freedreno_priv.h"
++
++#ifndef __user
++#define __user /* kernel header annotation, as in tu_knl_kgsl.cc */
++#endif
++#include "../../vulkan/msm_kgsl.h"
++
++int kgsl_safe_ioctl(int fd, unsigned long request, void *arg);
++int kgsl_get_prop(int fd, unsigned int type, void *value, size_t size);
++
++struct kgsl_device {
++   struct fd_device base;
++   int dma_heap_fd; /* /dev/dma_heap/system, -1 if missing */
++};
++FD_DEFINE_CAST(fd_device, kgsl_device);
++
++struct fd_device *kgsl_device_new(int fd);
++
++struct kgsl_pipe {
++   struct fd_pipe base;
++   uint32_t gpu_id;
++   uint64_t chip_id;
++   uint32_t gmem_size;
++   uint64_t gmem_base;
++   uint64_t va_size;
++   uint64_t uche_trap_base;
++   uint32_t queue_id; /* KGSL draw context */
++};
++FD_DEFINE_CAST(fd_pipe, kgsl_pipe);
++
++struct fd_pipe *kgsl_pipe_new(struct fd_device *dev, enum fd_pipe_id id,
++                              uint32_t prio);
++struct fd_submit *kgsl_submit_sp_new(struct fd_pipe *pipe);
++
++struct kgsl_bo {
++   struct fd_bo base;
++   uint64_t iova;
++   int shared_fd; /* dma-buf behind the BO (imported or dma-heap), or -1 */
++};
++FD_DEFINE_CAST(fd_bo, kgsl_bo);
++
++struct fd_bo *kgsl_bo_new(struct fd_device *dev, uint32_t size, uint32_t flags);
++struct fd_bo *kgsl_bo_from_handle(struct fd_device *dev, uint32_t size,
++                                  uint32_t handle);
++struct fd_bo *kgsl_bo_from_dmabuf(struct fd_device *dev, int fd);
++void kgsl_bo_close_handle(struct fd_bo *bo);
++
++#endif
+diff --git a/src/freedreno/drm/kgsl/kgsl_ringbuffer_sp.c b/src/freedreno/drm/kgsl/kgsl_ringbuffer_sp.c
+new file mode 100644
+index 0000000..a90d013
+--- /dev/null
++++ b/src/freedreno/drm/kgsl/kgsl_ringbuffer_sp.c
+@@ -0,0 +1,118 @@
++/*
++ * SPDX-License-Identifier: MIT
++ */
++
++#include <errno.h>
++#include <unistd.h>
++
++#include "util/perf/cpu_trace.h"
++
++#include "freedreno_ringbuffer_sp.h"
++#include "kgsl_priv.h"
++
++static int
++timestamp_to_fd(struct fd_pipe *pipe, uint32_t timestamp)
++{
++   struct kgsl_pipe *kgsl_pipe = to_kgsl_pipe(pipe);
++   int fd = -1;
++   struct kgsl_timestamp_event event = {
++      .type = KGSL_TIMESTAMP_EVENT_FENCE,
++      .context_id = kgsl_pipe->queue_id,
++      .timestamp = timestamp,
++      .priv = &fd,
++      .len = sizeof(fd),
++   };
++
++   if (kgsl_safe_ioctl(pipe->dev->fd, IOCTL_KGSL_TIMESTAMP_EVENT, &event))
++      return -1;
++
++   return fd;
++}
++
++static int
++flush_submit_list(struct list_head *submit_list)
++{
++   struct fd_submit_sp *fd_submit = to_fd_submit_sp(last_submit(submit_list));
++   struct fd_pipe *pipe = fd_submit->base.pipe;
++   struct kgsl_pipe *kgsl_pipe = to_kgsl_pipe(pipe);
++   unsigned nr_cmds = 0;
++
++   MESA_TRACE_FUNC();
++
++   foreach_submit (submit, submit_list) {
++      assert(submit->pipe == &kgsl_pipe->base);
++      nr_cmds += to_fd_ringbuffer_sp(submit->primary)->u.nr_cmds;
++   }
++
++   struct kgsl_command_object cmds[nr_cmds];
++   unsigned cmd_idx = 0;
++
++   /* KGSL takes GPU addresses and no BO list, so merging deferred submits
++    * is only concatenating their IBs.  No sub-alloc heaps here, so a ring
++    * BO's iova is its own.
++    */
++   foreach_submit_safe (submit, submit_list) {
++      struct fd_ringbuffer_sp *primary = to_fd_ringbuffer_sp(submit->primary);
++
++      for (unsigned i = 0; i < primary->u.nr_cmds; i++) {
++         struct fd_bo *ring_bo = primary->u.cmds[i].ring_bo;
++
++         cmds[cmd_idx++] = (struct kgsl_command_object){
++            .offset = 0,
++            .gpuaddr = ring_bo->iova + primary->offset,
++            .size = primary->u.cmds[i].size,
++            .flags = KGSL_CMDLIST_IB,
++            .id = ring_bo->handle,
++         };
++      }
++
++      if (submit == last_submit(submit_list))
++         break;
++
++      list_del(&submit->node);
++      fd_submit_del(submit);
++   }
++
++   struct kgsl_cmd_syncpoint_fence sync_fence = {
++      .fd = fd_submit->in_fence_fd,
++   };
++   struct kgsl_command_syncpoint sync = {
++      .type = KGSL_CMD_SYNCPOINT_TYPE_FENCE,
++      .size = sizeof(sync_fence),
++      .priv = (uintptr_t)&sync_fence,
++   };
++   struct kgsl_gpu_command req = {
++      .flags = KGSL_CMDBATCH_SUBMIT_IB_LIST,
++      .cmdlist = (uintptr_t)cmds,
++      .cmdsize = sizeof(struct kgsl_command_object),
++      .numcmds = cmd_idx,
++      .synclist = (uintptr_t)&sync,
++      .syncsize = sizeof(struct kgsl_command_syncpoint),
++      .numsyncs = fd_submit->in_fence_fd != -1 ? 1 : 0,
++      .context_id = kgsl_pipe->queue_id,
++   };
++
++   int ret = kgsl_safe_ioctl(pipe->dev->fd, IOCTL_KGSL_GPU_COMMAND, &req);
++   if (ret) {
++      ERROR_MSG("GPU_COMMAND failed (%s)", strerror(errno));
++   } else {
++      fd_submit->out_fence->kfence = req.timestamp;
++      if (fd_submit->out_fence->use_fence_fd) {
++         fd_submit->out_fence->fence_fd = timestamp_to_fd(pipe, req.timestamp);
++         if (fd_submit->out_fence->fence_fd < 0)
++            ERROR_MSG("no sync file for timestamp %u (%s)", req.timestamp,
++                      strerror(errno));
++      }
++   }
++
++   if (fd_submit->in_fence_fd != -1)
++      close(fd_submit->in_fence_fd);
++
++   return ret;
++}
++
++struct fd_submit *
++kgsl_submit_sp_new(struct fd_pipe *pipe)
++{
++   return fd_submit_sp_new(pipe, flush_submit_list);
++}
+diff --git a/src/freedreno/drm/meson.build b/src/freedreno/drm/meson.build
+index d2baf58..b80dc4b 100644
+--- a/src/freedreno/drm/meson.build
++++ b/src/freedreno/drm/meson.build
+@@ -64,6 +64,18 @@ if freedreno_kmds.contains('virtio')
+   libfreedreno_drm_link_with += libvdrm
+ endif
+ 
++libfreedreno_drm_kgsl_files = files(
++  'kgsl/kgsl_bo.c',
++  'kgsl/kgsl_device.c',
++  'kgsl/kgsl_pipe.c',
++  'kgsl/kgsl_priv.h',
++  'kgsl/kgsl_ringbuffer_sp.c',
++)
++if freedreno_kmds.contains('kgsl')
++  libfreedreno_drm_files += libfreedreno_drm_kgsl_files
++  libfreedreno_drm_flags += '-DHAVE_FREEDRENO_KGSL'
++endif
++
+ libfreedreno_drm = static_library(
+   'freedreno_drm',
+   [
+diff --git a/src/gallium/drivers/freedreno/freedreno_screen.c b/src/gallium/drivers/freedreno/freedreno_screen.c
+index 4b128d4..3edd138 100644
+--- a/src/gallium/drivers/freedreno/freedreno_screen.c
++++ b/src/gallium/drivers/freedreno/freedreno_screen.c
+@@ -373,6 +373,10 @@ fd_init_screen_caps(struct fd_screen *screen)
+ 
+    u_init_pipe_screen_caps(&screen->base, 1);
+ 
++   /* KGSL: not a DRM fd, but dma-buf import/export work (kgsl_bo.c) */
++   if (!caps->dmabuf)
++      caps->dmabuf = DRM_PRIME_CAP_IMPORT | DRM_PRIME_CAP_EXPORT;
++
+    /* this is probably not totally correct.. but it's a start: */
+ 
+    /* Supported features (boolean caps). */
+diff --git a/src/gallium/winsys/kmsro/drm/kmsro_drm_winsys.c b/src/gallium/winsys/kmsro/drm/kmsro_drm_winsys.c
+index 2ead5db..14f24b0 100644
+--- a/src/gallium/winsys/kmsro/drm/kmsro_drm_winsys.c
++++ b/src/gallium/winsys/kmsro/drm/kmsro_drm_winsys.c
+@@ -40,6 +40,7 @@
+ #include "pipe-loader/pipe_loader.h"
+ #include "renderonly/renderonly.h"
+ #include "util/u_memory.h"
++#include "util/u_debug.h"
+ 
+ #include "loader.h"
+ 
+@@ -61,6 +62,35 @@ struct pipe_screen *kmsro_drm_screen_create(int kms_fd,
+    int *gpu_fds = NULL;
+    unsigned int n_devices = 0;
+ 
++#if defined(GALLIUM_FREEDRENO)
++   /* FD_KGSL=1: freedreno on the downstream KGSL GPU driver (/dev/kgsl-3d0),
++    * which has no DRM render node. Scanout buffers are dumb buffers on the
++    * KMS device, imported into KGSL as dma-bufs.
++    */
++   if (debug_get_bool_option("FD_KGSL", false)) {
++      int kgsl_fd = open("/dev/kgsl-3d0", O_RDWR | O_CLOEXEC);
++      struct renderonly *ro = kgsl_fd >= 0 ? CALLOC_STRUCT(renderonly) : NULL;
++      if (ro) {
++         ro->kms_fd = kms_fd;
++         ro->gpu_fd = kgsl_fd;
++         ro->destroy = kmsro_ro_destroy;
++         util_sparse_array_init(&ro->bo_map, sizeof(struct renderonly_scanout), 64);
++         simple_mtx_init(&ro->bo_map_lock, mtx_plain);
++         ro->create_for_resource = renderonly_create_kms_dumb_buffer_for_resource;
++         screen = fd_drm_screen_create_renderonly(kgsl_fd, ro, config);
++         if (screen && screen->caps.graphics)
++            return screen;
++         if (screen)
++            screen->destroy(screen);
++         else
++            kmsro_ro_destroy(ro);
++         screen = NULL;
++      } else if (kgsl_fd >= 0) {
++         close(kgsl_fd);
++      }
++   }
++#endif
++
+    gpu_fds = pipe_loader_get_compatible_render_capable_device_fds(kms_fd, &n_devices);
+    if (n_devices == 0) {
+       goto out;

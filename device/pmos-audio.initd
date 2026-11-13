@@ -25,6 +25,10 @@ start() {
 		return 0
 	fi
 	(
+		# Same order as ever: both mount the vendor image, and this has
+		# only been tested with the modem already up.
+		i=0
+		while [ $i -lt 45 ] && [ ! -e /run/pmos-wifi-done ]; do sleep 1; i=$((i + 1)); done
 		/usr/local/bin/vendor-up.sh audio
 		/usr/local/bin/pmos-adroot.sh
 	) >/var/log/audio-up.log 2>&1 &

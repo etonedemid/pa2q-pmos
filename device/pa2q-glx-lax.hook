@@ -1,0 +1,13 @@
+# /etc/pacman.d/hooks/: Steam ARM's private GLX (libGLX_mesa with its
+# cross-thread current-context check removed) must match the installed Mesa.
+# It gets its own SONAME: with Mesa's, ldconfig pointed libGLX_mesa.so.0 at it.
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = mesa
+
+[Action]
+Description = Rebuilding Steam ARM's private GLX copy...
+When = PostTransaction
+Exec = /bin/sh -c 'python3 /usr/local/lib/steam-arm-glx-lax-patch.py /usr/lib/libGLX_mesa.so.0 /usr/lib/libGLX_steamarmlax.so.0 && patchelf --set-soname libGLX_steamarmlax.so.0 /usr/lib/libGLX_steamarmlax.so.0 && ldconfig'

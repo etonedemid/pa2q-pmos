@@ -28,6 +28,9 @@ to_android() {
 
 trace() {
 	[ -f $TRACE ] && mv -f $TRACE $TRACE.prev
+	# The ring buffer wraps ~15 s in; keep the start of the boot.
+	dmesg > /var/log/boot-early.log
+	: > /var/log/boot-timeline.log
 	while [ ! -e /run/pmos-boot-ok ]; do
 		{ echo "uptime $(cut -d' ' -f1 /proc/uptime)"
 		  echo "starting: $(ls /run/openrc/starting 2>/dev/null | tr '\n' ' ')"
@@ -35,6 +38,7 @@ trace() {
 		  dmesg
 		} > $TRACE.tmp 2>&1
 		mv -f $TRACE.tmp $TRACE; sync
+		echo "$(cut -d' ' -f1 /proc/uptime) $(ls /run/openrc/starting 2>/dev/null | tr '\n' ' ')" >> /var/log/boot-timeline.log
 		up=$(cut -d. -f1 /proc/uptime)
 		if [ "$up" -ge $DEADLINE ] && [ ! -e /etc/pmos-no-deadline ]; then
 			echo "<2>bootkey-recovery: boot not confirmed by ${DEADLINE}s uptime - letting the watchdog reset the phone" > /dev/kmsg

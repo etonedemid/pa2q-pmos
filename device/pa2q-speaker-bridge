@@ -33,7 +33,8 @@ until grep -q "]:" /proc/asound/cards 2>/dev/null && mountpoint -q $R/vendor; do
 BC=/opt/adroot/vendor/etc/backend_conf.xml
 if ! grep -q 'TDM-LPAIF-RX-PRIMARY" rate="48000" ch="2" bits="24"' $BC; then
 	# format must be explicit, or the open fails with -EIO
-	sed 's|\(name="TDM-LPAIF-RX-PRIMARY" rate="48000" ch="2" bits="\)16"|\124" format="PCM_FORMAT_S24_LE"|' $BC > /run/pa2q-backend_conf.xml
+	sed 's|\(name="TDM-LPAIF-RX-PRIMARY" rate="48000" ch="2" bits="\)16"|\124" format="PCM_FORMAT_S24_LE"|' $BC |
+		sed 's|</config>|    <device name="DISPLAY_PORT-RX-0" rate="48000" ch="2" bits="24" format="PCM_FORMAT_S24_3LE" />\n</config>|' > /run/pa2q-backend_conf.xml
 	mount --bind /run/pa2q-backend_conf.xml $BC
 fi
 
@@ -79,11 +80,30 @@ while True:
 EOF
 }
 
+# Docked (USB-C DisplayPort connected): play on the TV instead, like a Switch.
+# The vendor agmplay cannot set the DP interface config, pa2q-dp-shim does
+# (see pa2q-dp-shim.c). A plug/unplug stops agmplay, the loop restarts it on
+# the other backend.
+DP=/sys/class/drm/card0-DP-1/status
+(
+	last=$(cat $DP)
+	while sleep 2; do
+		now=$(cat $DP)
+		[ "$now" != "$last" ] && last=$now && pkill -x agmplay
+	done
+) &
+
 while :; do
 	relay &
-	chroot $R /vendor/bin/agmplay /tmp/pa2q-speaker.fifo -D 100 -d 100 \
-		-i TDM-LPAIF-RX-PRIMARY -dkv 0xA2000001 -dppkv 0xAC000002 \
+	rp=$!
+	if [ "$(cat $DP)" = connected ]; then
+		run="/system/bin/env LD_PRELOAD=/pa2q-dp-shim.so /vendor/bin/agmplay"
+		be="-i DISPLAY_PORT-RX-0 -dkv 0xA2000006"
+	else
+		run=/vendor/bin/agmplay be="-i TDM-LPAIF-RX-PRIMARY -dkv 0xA2000001"
+	fi
+	chroot $R $run /tmp/pa2q-speaker.fifo -D 100 -d 100 $be -dppkv 0xAC000002 \
 		-skv 0xA100000E -ikv 1 >/dev/null 2>&1
-	wait
+	wait $rp   # not the dock watcher
 	sleep 1
 done

@@ -1,0 +1,9 @@
+[Unit]
+StartLimitIntervalSec=0
+Description=Hold the ADSP audio protection domain open
+ConditionPathExists=/dev/fastrpc-adsp-secure
+
+[Service]
+ExecStart=/usr/local/bin/pmos-audiopd
+Restart=on-failure
+RestartSec=3

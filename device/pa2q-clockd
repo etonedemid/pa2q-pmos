@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+# Applies a clock preset for whichever Steam game is running, as chosen in the
+# Phone Controls Decky plugin (~/.config/pa2q-clocks.conf: "<appid> <preset>", appid "default"
+# for the Steam UI and unlisted games). Outside gaming mode clocks are stock.
+#
+# Lower GPU level = faster: 0 is 1200 MHz, 7 is 660 MHz, 14 is 160 MHz. The kernel's
+# governor still moves between the limits. msm-adreno-tz sat at 160 MHz at 80% busy
+# (it only rises near 95%), which lags the UI and games: hence a raised floor.
+#
+# Also carries out "Reboot to Android" from that plugin, which runs in the Steam container
+# and cannot reach the host: it leaves REBOOT_REQUEST for this root service.
+import os
+import subprocess
+import sys
+import time
+
+CONF = "/home/etonedemid/.config/pa2q-clocks.conf"
+GPU = "/sys/class/kgsl/kgsl-3d0/"
+CPU = "/sys/devices/system/cpu/cpufreq/"
+REBOOT_REQUEST = "/home/etonedemid/.cache/pa2q-reboot-android"
+REQUEST_MAX_AGE_S = 60  # a request left over from before a reboot must not switch again
+POLL_S = 2  # ponytail: polls /proc, use a Steam hook if a game ever needs instant clocks
+
+# name: GPU slowest level, GPU fastest level, CPU min, CPU max (fractions of top speed)
+PRESETS = {
+    "battery": (14, 7, 0.0, 0.6),
+    "balanced": (7, 0, 0.0, 1.0),
+    "performance": (3, 0, 0.4, 1.0),
+    "max": (0, 0, 0.7, 1.0),
+}
+STOCK = (14, 0, 0.0, 1.0)
+DEFAULT = "balanced"
+
+
+def load(path=CONF):
+    """Only known presets survive: a bad line falls back to the default."""
+    table = {}
+    try:
+        with open(path) as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) == 2 and parts[1] in PRESETS:
+                    table[parts[0]] = parts[1]
+    except OSError:
+        pass
+    return table
+
+
+def choose(table, game, gaming):
+    if not gaming:
+        return STOCK
+    return PRESETS[table.get(game) or table.get("default") or DEFAULT]
+
+
+def scan(proc="/proc"):
+    """(gamescope running, appid of the running Steam game or None)"""
+    gaming, game = False, None
+    # Numeric order: the newest launch wins if two are alive.
+    for pid in sorted((p for p in os.listdir(proc) if p.isdigit()), key=int):
+        try:
+            with open("%s/%s/cmdline" % (proc, pid), "rb") as f:
+                args = f.read().split(b"\0")
+        except OSError:
+            continue
+        if os.path.basename(args[0]) == b"gamescope":
+            gaming = True
+        if b"SteamLaunch" in args:
+            for arg in args:
+                if arg.startswith(b"AppId="):
+                    game = arg[6:].decode()
+    return gaming, game
+
+
+def put(path, value):
+    try:
+        with open(path, "w") as f:
+            f.write(str(value))
+    except OSError as e:
+        print("pa2q-clockd: %s: %s" % (path, e), flush=True)
+
+
+def get(path):
+    with open(path) as f:
+        return int(f.read())
+
+
+def apply(preset, gpu=GPU, cpu=CPU):
+    slow, fast, low, high = preset
+    # KGSL refuses a fastest level slower than the slowest: open the range first.
+    put(gpu + "max_pwrlevel", 0)
+    put(gpu + "min_pwrlevel", slow)
+    put(gpu + "max_pwrlevel", fast)
+    for policy in os.listdir(cpu):
+        if not policy.startswith("policy"):
+            continue
+        p = cpu + policy + "/"
+        bottom, top = get(p + "cpuinfo_min_freq"), get(p + "cpuinfo_max_freq")
+        put(p + "scaling_min_freq", bottom)  # scaling_max below an old min would fail
+        put(p + "scaling_max_freq", int(top * high))
+        put(p + "scaling_min_freq", max(bottom, int(top * low)))
+
+
+def reboot_requested(path=REBOOT_REQUEST):
+    try:
+        age = time.time() - os.stat(path).st_mtime
+        os.unlink(path)
+    except OSError:
+        return False
+    return age < REQUEST_MAX_AGE_S
+
+
+def main():
+    current = None
+    while True:
+        if reboot_requested():
+            subprocess.run(["/usr/local/bin/boot-switch", "android"])
+        gaming, game = scan()
+        wanted = choose(load(), game, gaming)
+        if wanted != current:
+            apply(wanted)
+            current = wanted
+            print("pa2q-clockd: game=%s %s" % (game, wanted), flush=True)
+        time.sleep(POLL_S)
+
+
+def check():
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        conf = d + "/conf"
+        with open(conf, "w") as f:
+            f.write("default battery\n250900 max\n1 bogus\nnoise\n")
+        table = load(conf)
+        assert table == {"default": "battery", "250900": "max"}
+        assert choose(table, "250900", True) == PRESETS["max"]
+        assert choose(table, "1", True) == PRESETS["battery"]
+        assert choose({}, None, True) == PRESETS[DEFAULT]
+        assert choose(table, "250900", False) == STOCK
+        assert load(d + "/missing") == {}
+        os.makedirs(d + "/gpu")
+        os.makedirs(d + "/cpu/policy0")
+        for name, v in (("cpuinfo_min_freq", 100), ("cpuinfo_max_freq", 1000)):
+            with open(d + "/cpu/policy0/" + name, "w") as f:
+                f.write(str(v))
+        apply(PRESETS["battery"], d + "/gpu/", d + "/cpu/")
+        assert get(d + "/gpu/min_pwrlevel") == 14 and get(d + "/gpu/max_pwrlevel") == 7
+        assert get(d + "/cpu/policy0/scaling_max_freq") == 600
+        assert get(d + "/cpu/policy0/scaling_min_freq") == 100
+        apply(PRESETS["max"], d + "/gpu/", d + "/cpu/")
+        assert get(d + "/cpu/policy0/scaling_min_freq") == 700
+        request = d + "/request"
+        assert not reboot_requested(request)
+        open(request, "w").close()
+        assert reboot_requested(request) and not os.path.exists(request)
+        open(request, "w").close()
+        os.utime(request, (0, 0))
+        assert not reboot_requested(request) and not os.path.exists(request)
+    print("ok")
+
+
+if __name__ == "__main__":
+    check() if "--check" in sys.argv else main()

@@ -1,0 +1,9 @@
+[Unit]
+Description=Clock presets for Steam games
+
+[Service]
+ExecStart=/usr/local/bin/pa2q-clockd
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

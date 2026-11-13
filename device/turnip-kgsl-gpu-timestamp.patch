@@ -1,0 +1,20 @@
+Turnip's KGSL backend advertises VK_KHR_calibrated_timestamps but its
+device_get_gpu_timestamp is UNREACHABLE. vkd3d-proton's GetClockCalibration then
+fails with VK_ERROR_OUT_OF_HOST_MEMORY, which Unreal Engine 5 reports as a fatal
+"Out of video memory" at startup (Half Sword).
+--- a/src/freedreno/vulkan/tu_knl_kgsl.cc
++++ b/src/freedreno/vulkan/tu_knl_kgsl.cc
+@@ -1707,6 +1707,12 @@
+ kgsl_device_get_gpu_timestamp(struct tu_device *dev, uint64_t *ts)
+ {
+-   UNREACHABLE("");
++   /* ponytail: the arch timer runs at the GPU always-on rate (19.2 MHz) but has
++    * its own epoch, so this calibrates rates and not GPU query values exactly.
++    * Good enough for engine profilers; read the CP always-on counter if a tool
++    * ever needs them aligned. */
++   uint64_t counter;
++   __asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(counter));
++   *ts = counter;
+    return 0;
+ }
+ 

@@ -1,0 +1,11 @@
+[Unit]
+Description=Sound card (ADSP + AudioReach) and the vendor audio chroot
+After=pa2q-wifi.service pa2q-adsp.service
+
+[Service]
+# Slow (minutes): never let other units wait for it, OpenRC ran it in the background.
+Type=exec
+ExecStart=/bin/sh -c '/usr/local/bin/vendor-up.sh audio; /usr/local/bin/pmos-adroot.sh'
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=pa2q thermal governor (caps CPU freq; kernel trips are 105C+)
+After=systemd-modules-load.service
+
+[Service]
+ExecStartPre=/bin/sh -c 'for p in /sys/devices/system/cpu/cpufreq/policy*; do echo walt > $p/scaling_governor 2>/dev/null || echo schedutil > $p/scaling_governor; done; true'
+ExecStart=/usr/local/bin/pmos-thermald
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

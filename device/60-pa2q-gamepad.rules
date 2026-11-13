@@ -8,3 +8,6 @@ KERNEL=="uinput", SUBSYSTEM=="misc", OPTIONS+="static_node=uinput", TAG+="uacces
 KERNEL=="hidraw*", ATTRS{idVendor}=="3537", TAG+="uaccess"
 KERNEL=="hidraw*", KERNELS=="*:3537:*", TAG+="uaccess"
 KERNEL=="hidraw*", ENV{ID_INPUT_JOYSTICK}=="1", TAG+="uaccess"
+# pa2q-keys (runs as the seat user) sets brightness and the flashlight.
+ACTION=="add", SUBSYSTEM=="backlight", KERNEL=="panel0-backlight", RUN+="/bin/chgrp video /sys%p/brightness", RUN+="/bin/chmod g+w /sys%p/brightness"
+ACTION=="add", SUBSYSTEM=="leds", KERNEL=="led:torch_0|led:switch_0", RUN+="/bin/chgrp video /sys%p/brightness", RUN+="/bin/chmod g+w /sys%p/brightness"

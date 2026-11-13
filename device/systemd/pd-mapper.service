@@ -1,0 +1,6 @@
+[Unit]
+Description=Qualcomm protection domain mapper
+
+[Service]
+ExecStart=/usr/local/bin/pd-mapper
+Restart=on-failure

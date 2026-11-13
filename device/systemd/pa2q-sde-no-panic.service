@@ -1,0 +1,13 @@
+[Unit]
+Description=Stop SDE from panicking on display errors; let USB-C docks hotplug
+After=systemd-modules-load.service
+Before=display-manager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# video=DP-1:d on the bootloader cmdline forces DP off; "detect" clears it.
+ExecStart=/bin/sh -c 'P=/sys/kernel/debug/dri/0/debug/panic; i=0; while [ ! -e $P ] && [ $i -lt 15 ]; do sleep 1; i=$((i+1)); done; [ -e $P ] && echo 0 > $P; echo detect > /sys/class/drm/card0-DP-1/status'
+
+[Install]
+WantedBy=multi-user.target

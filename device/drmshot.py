@@ -2,6 +2,18 @@
 # Screenshot whatever the display is scanning out, straight from DRM (run as
 # root; works while a compositor owns the device). Writes a binary PPM.
 # usage: drmshot.py [out.ppm] [card]
+import glob
+import sys
+
+# Mapping gamescope's scanout buffer (GPU memory, not a dumb buffer) appears to
+# reset the phone: every reset seen on 2026-11-05/06 landed on this call. Refuse.
+for c in glob.glob("/proc/[0-9]*/comm"):
+    try:
+        if open(c).read().startswith("gamescope"):
+            sys.exit("drmshot: gamescope is on the panel, use gamescopectl screenshot")
+    except OSError:
+        pass
+
 import ctypes, fcntl, mmap, os, struct, sys
 
 def iowr(nr, size):

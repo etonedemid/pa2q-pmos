@@ -1,0 +1,13 @@
+[Unit]
+StartLimitIntervalSec=0
+Description=PipeWire Speaker sink -> vendor agmplay
+After=pa2q-audio.service
+Before=display-manager.service
+
+[Service]
+ExecStart=/usr/libexec/pa2q-speaker-bridge
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

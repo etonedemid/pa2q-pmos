@@ -5,3 +5,9 @@ loopcfg
 setloopbsz
 *.img
 *.db
+
+# made locally from Steam and Breeze icons, not published (Steam trademark)
+device/pa2q-greeter-*.png
+
+# python bytecode
+__pycache__/

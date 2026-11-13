@@ -1,0 +1,12 @@
+[Unit]
+Description=Bring up wlan0 (vendor config, EFS MAC, qca_cld3 host driver)
+After=systemd-udev-settle.service local-fs.target
+Before=NetworkManager.service
+
+[Service]
+# Slow (minutes): never let other units wait for it, OpenRC ran it in the background.
+Type=exec
+ExecStart=/usr/local/bin/vendor-up.sh wifi
+
+[Install]
+WantedBy=multi-user.target

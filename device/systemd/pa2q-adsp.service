@@ -1,0 +1,11 @@
+[Unit]
+Description=Boot the ADSP (audio DSP)
+After=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=-/bin/sh -c 'echo 1 > /sys/kernel/boot_adsp/boot'
+
+[Install]
+WantedBy=multi-user.target

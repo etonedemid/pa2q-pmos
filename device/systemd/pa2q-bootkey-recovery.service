@@ -1,0 +1,13 @@
+[Unit]
+Description=Back to Android: VOLUME-UP held at boot, or after a boot that never finished
+DefaultDependencies=no
+After=systemd-remount-fs.service
+Before=systemd-udevd.service systemd-modules-load.service sysinit.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/pa2q-bootkey-recovery
+
+[Install]
+WantedBy=sysinit.target

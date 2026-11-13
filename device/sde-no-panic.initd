@@ -16,4 +16,8 @@ start() {
 	[ -e $P ] || { ewarn "no $P (msm_drm not loaded?)"; return 0; }
 	echo 0 > $P
 	einfo "SDE panic_on_err = $(cat $P)"
+	# USB-C docks: the bootloader's cmdline has video=DP-1:d, which forces the
+	# connector off (always "disconnected", and drm_get_edid() returns nothing).
+	# "detect" clears the force; gamescope then moves to the TV on hotplug.
+	echo detect > /sys/class/drm/card0-DP-1/status
 }

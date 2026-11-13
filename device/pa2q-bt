@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+# Brings up Bluetooth: the WCN7850-class "kiwi" chip on ttyHS0 (898000, the
+# 4-wire UART; ttyHS5 is an unrelated 2-wire port). The DT has no serdev node,
+# so it is attached with btattach and needs the hci_qca no-serdev fixes.
+#
+# Three things Android's BT HAL does that we must do too:
+#  - hold the UART clock vote (msm_geni_serial ioctl). Without it the port
+#    autosuspends while the chip applies its NVM and the ack is lost.
+#  - power-cycle the chip so it starts in ROM at 115200 again.
+#  - set the real address from EFS: the NVM only has a placeholder, and
+#    without a public address the controller stays "unconfigured".
+import fcntl
+import os
+import subprocess
+import sys
+import time
+
+UART = "/dev/ttyHS0"
+TIOCPMGET = 0x54ED
+EFS, EFS_ADDR = "/dev/disk/by-partlabel/efs", "bluetooth/bt_addr"
+
+
+def sh(*cmd):
+    return subprocess.run(cmd, capture_output=True, text=True).stdout
+
+
+def rfkill():
+    for r in os.listdir("/sys/class/rfkill"):
+        with open("/sys/class/rfkill/%s/name" % r) as f:
+            if f.read().strip() == "bt_power":
+                return "/sys/class/rfkill/%s/state" % r
+    sys.exit("pa2q-bt: no bt_power rfkill")
+
+
+def address():
+    os.makedirs("/run/pa2q-efs", exist_ok=True)
+    if subprocess.run(["mount", "-o", "ro", EFS, "/run/pa2q-efs"]).returncode:
+        return None
+    try:
+        with open("/run/pa2q-efs/" + EFS_ADDR) as f:
+            return f.read().strip("\0 \n")  # Samsung writes a trailing NUL
+    except OSError:
+        return None
+    finally:
+        subprocess.run(["umount", "/run/pa2q-efs"])
+
+
+def main():
+    state = rfkill()
+    for v in "01":
+        with open(state, "w") as f:
+            f.write(v)
+        time.sleep(1)
+    vote = os.open(UART, os.O_RDWR | os.O_NOCTTY)
+    fcntl.ioctl(vote, TIOCPMGET)
+    attach = subprocess.Popen(["btattach", "-B", UART, "-P", "qca", "-S", "115200"])
+    try:
+        for _ in range(30):
+            if "Unconfigured" in sh("btmgmt", "-i", "hci0", "config"):
+                break
+            time.sleep(1)
+        addr = address()
+        print("pa2q-bt: address", addr, flush=True)
+        if addr:
+            print(sh("btmgmt", "-i", "hci0", "public-addr", addr).strip(), flush=True)
+        sys.exit(attach.wait())
+    finally:
+        attach.kill()  # a leftover btattach keeps the port busy for the restart
+
+
+if __name__ == "__main__":
+    main()

@@ -15,6 +15,11 @@ export VK_DRIVER_FILES=/etc/vulkan/icd.d/freedreno_kgsl_icd.json
 # (2026-10-31), so it is not the default.
 export VK_ICD_FILENAMES=$VK_DRIVER_FILES
 export MESA_LOADER_DRIVER_OVERRIDE=kmsro
+# zink picks the Vulkan device whose DRM node is the display's. KGSL has none,
+# so the glibc Turnip on Arch (turnip-kgsl-report-display-drm.patch) reports
+# these; without them kwin fell back to llvmpipe (2026-11-09). pmOS's older
+# Turnip build ignores them.
+export TU_KGSL_DRM_RENDER=/dev/dri/renderD128 TU_KGSL_DRM_PRIMARY=/dev/dri/card0
 # Concurrent binning (A7xx+ BV pipe) drops whole triangles on KGSL whenever more
 # than one GPU client is busy (kwin overview: half-drawn window quads; black
 # pixels in apps). Off for the whole session; apps inherit it (2026-10-31).

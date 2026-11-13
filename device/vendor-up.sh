@@ -74,7 +74,7 @@ modem)
 	ln -sf modemst2 /var/lib/rmtfs/modem_fs2
 	ln -sf fsg      /var/lib/rmtfs/modem_fsg
 	ln -sf fsc      /var/lib/rmtfs/modem_fsc
-	pidof rmtfs >/dev/null 2>&1 || { /usr/local/bin/rmtfs -o /var/lib/rmtfs -s -v > /var/log/rmtfs.log 2>&1 & sleep 3; }
+	pidof rmtfs >/dev/null 2>&1 || { /usr/local/bin/rmtfs -o /var/lib/rmtfs -s -v > /var/log/rmtfs.log 2>&1 & sleep 1; }
 	pidof rmtfs >/dev/null 2>&1 || { log "rmtfs failed to start - see /var/log/rmtfs.log"; exit 1; }
 	log "rmtfs running"
 	mount -t debugfs none /sys/kernel/debug 2>/dev/null
@@ -82,7 +82,6 @@ modem)
 	echo enabled > /sys/kernel/debug/remoteproc/remoteproc1/recovery 2>/dev/null
 	echo -n /lib/firmware/modem-only > /sys/module/firmware_class/parameters/path
 	echo start > /sys/class/remoteproc/remoteproc1/state 2>/dev/null
-	sleep 20
 	# firmware_class.path is a GLOBAL kernel parameter, not scoped to this
 	# remoteproc load: leaving it pointed at modem-only starves every other
 	# request_firmware() call for the rest of uptime of anything outside
@@ -97,6 +96,14 @@ modem)
 	# never gets configured. Reset it back to default now that the modem's
 	# own load is done.
 	echo "" > /sys/module/firmware_class/parameters/path
+	# The desktop may start from here on: see pmos-wifi.
+	touch /run/pmos-modem-loaded
+	# The firmware loads in ~1 s. Wi-Fi needs DMS (QMI service 2), so wait for
+	# that; 20 s is only the cap.
+	i=0
+	while [ $i -lt 40 ] && ! qrtr-lookup 2>/dev/null | awk '$1 == 2 { f = 1 } END { exit !f }'; do
+		sleep 0.5; i=$((i + 1))
+	done
 	log "modem: $(cat /sys/class/remoteproc/remoteproc1/state), $(qrtr-lookup 2>/dev/null | tail -n +2 | wc -l) QMI services"
 	;;
 display)

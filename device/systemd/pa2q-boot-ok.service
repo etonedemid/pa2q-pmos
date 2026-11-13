@@ -1,0 +1,10 @@
+[Unit]
+Description=Confirm this boot finished (resets the boot-loop counter)
+After=sshd.service multi-user.target
+
+[Service]
+Type=exec
+ExecStart=/bin/sh -c 'sleep 60; touch /run/pmos-boot-ok; echo 0 > /var/lib/dualboot/bootfails; sync'
+
+[Install]
+WantedBy=multi-user.target

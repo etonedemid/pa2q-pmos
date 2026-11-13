@@ -1,0 +1,17 @@
+#!/sbin/openrc-run
+# Bluetooth chip bring-up, see pa2q-bt.
+description="Attaches the Bluetooth controller"
+supervisor=supervise-daemon
+command=/usr/local/bin/pa2q-bt
+output_log=/var/log/pa2q-bt.log
+error_log=/var/log/pa2q-bt.log
+
+depend() {
+	need localmount
+	before bluetooth
+}
+
+start_pre() {
+	# here, not in pa2q-bt: bluetoothd must not start before bluetooth.ko
+	modprobe -a btpower msm_geni_serial hci_uart
+}

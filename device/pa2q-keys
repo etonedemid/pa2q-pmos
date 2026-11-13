@@ -1,0 +1,248 @@
+#!/usr/bin/env python3
+# Phone buttons and touch gestures in gaming mode (started by
+# pa2q-gamescope-session). Steam gets its usual actions from them:
+#   volume up/down            default sink +-5% (held: repeats)
+#   power, short press        sleep, like a Steam Deck (USB host attached: screen off/on)
+#   power, double press       flashlight
+#   power, held 1 s           Steam's power menu
+#   power + volume up/down    screen brightness (held: repeats)
+#   volume up + down          screenshot (Steam's F12)
+#   3-finger tap              Steam menu
+#   3-finger double tap       quick access menu
+#   4-finger tap              on-screen keyboard
+# The keys sit on three devices (gpio-keys: volume up, pmic_resin: volume down,
+# pmic_pwrkey: power) and bounce; they are grabbed so gamescope/Steam do not act
+# on them too. The touchscreen is read without a grab: games see those fingers.
+import fcntl
+import glob
+import os
+import select
+import struct
+import subprocess
+import time
+
+EVENT = struct.Struct("llHHi")
+EV_SYN, EV_KEY, EV_ABS = 0, 1, 3
+ABS_MT_SLOT, ABS_MT_TRACKING_ID = 0x2F, 0x39
+KEY_VOLUMEDOWN, KEY_VOLUMEUP, KEY_POWER = 114, 115, 116
+KEY_TAB, KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_F12 = 15, 29, 42, 88
+EVIOCGRAB = 0x40044590
+UI_SET_EVBIT, UI_SET_KEYBIT, UI_DEV_CREATE = 0x40045564, 0x40045565, 0x5501
+BUTTONS = ("gpio-keys", "pmic_resin", "pmic_pwrkey")
+BACKLIGHT = "/sys/class/backlight/panel0-backlight"
+USB_MODE = "/sys/devices/platform/soc/a600000.ssusb/mode"
+TORCH = ("/sys/class/leds/led:torch_0/brightness", "/sys/class/leds/led:switch_0/brightness")
+
+VOLUME_STEP = "5%"
+BRIGHTNESS_STEP = 0.06     # of max, multiplied by current level so low end is fine
+DEBOUNCE_S = 0.08          # ignore a second press within this (contact bounce)
+REPEAT_DELAY_S, REPEAT_S = 0.4, 0.12
+POWER_LONG_S = 1.0
+POWER_DOUBLE_S = 0.35      # short press waits this long for a second one
+WAKE_IGNORE_S = 3.0        # the press that wakes the phone arrives after resume
+TAP_MAX_S, TAP_DOUBLE_S = 0.5, 0.35
+
+
+def device(name):
+    for d in glob.glob("/sys/class/input/event*"):
+        with open(d + "/device/name") as f:
+            if f.read().strip() == name:
+                return "/dev/input/" + os.path.basename(d)
+    return None
+
+
+def make_keyboard():
+    fd = os.open("/dev/uinput", os.O_WRONLY | os.O_NONBLOCK)
+    fcntl.ioctl(fd, UI_SET_EVBIT, EV_KEY)
+    for k in (KEY_TAB, KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_F12):
+        fcntl.ioctl(fd, UI_SET_KEYBIT, k)
+    os.write(fd, struct.pack("80sHHHHi", b"pa2q-keys", 3, 1, 3, 1, 0) + b"\0" * (4 * 64 * 4))
+    fcntl.ioctl(fd, UI_DEV_CREATE)
+    time.sleep(0.3)  # let libinput in gamescope see the new device
+    return fd
+
+
+def press(kb, *keys):
+    syn = EVENT.pack(0, 0, EV_SYN, 0, 0)
+    for k in keys:
+        os.write(kb, EVENT.pack(0, 0, EV_KEY, k, 1) + syn)
+        time.sleep(0.02)
+    for k in reversed(keys):
+        os.write(kb, EVENT.pack(0, 0, EV_KEY, k, 0) + syn)
+        time.sleep(0.02)
+
+
+def volume(key):
+    sign = "+" if key == KEY_VOLUMEUP else "-"
+    subprocess.run(["wpctl", "set-volume", "-l", "1.0", "@DEFAULT_AUDIO_SINK@", VOLUME_STEP + sign])
+
+
+def brightness(key):
+    with open(BACKLIGHT + "/max_brightness") as f:
+        top = int(f.read())
+    with open(BACKLIGHT + "/brightness") as f:
+        cur = int(f.read())
+    step = max(top // 200, int(cur * BRIGHTNESS_STEP * 2))
+    new = min(top, cur + step) if key == KEY_VOLUMEUP else max(top // 200, cur - step)
+    with open(BACKLIGHT + "/brightness", "w") as f:
+        f.write(str(new))
+
+
+def torch(state=[False]):
+    state[0] = not state[0]
+    for path in TORCH:
+        try:
+            with open(path, "w") as f:
+                f.write("100" if state[0] else "0")
+        except OSError as e:
+            print("torch:", e, flush=True)
+
+
+def steam(url):
+    # Passes the link to the running client only; never starts one.
+    subprocess.Popen(["/usr/local/bin/steam-arm", "--open", url],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def plugged():
+    try:
+        with open(USB_MODE) as f:
+            return f.read().strip() == "peripheral"
+    except OSError:
+        return False
+
+
+def screen_toggle(saved=[0]):
+    # ponytail: only dims. Backlight 0 is not off on this OLED and gamescope owns DPMS;
+    # taking it over through a VT switch left the panel black (2026-11-07).
+    with open(BACKLIGHT + "/brightness") as f:
+        cur = int(f.read())
+    with open(BACKLIGHT + "/brightness", "w") as f:
+        f.write("0" if cur else str(saved[0] or 400))
+    saved[0] = cur or saved[0]
+
+
+def suspend():
+    """True if the phone really went to sleep (the press that wakes it must be ignored)."""
+    # Samsung's usb_notify holds a wakeup source while a USB host is attached, so
+    # the kernel aborts suspend; dimming is all a plugged-in phone does for now.
+    if plugged():
+        screen_toggle()
+        return False
+    # The kernel can refuse (a dock or USB device holds a wakeup source too).
+    # Only a real sleep may start the wake-press ignore window: a refused one
+    # used to leave the button deaf for 3 s, eating the double press and the hold.
+    # Sleep time = how far CLOCK_BOOTTIME has run ahead of CLOCK_MONOTONIC.
+    def slept():
+        return time.clock_gettime(time.CLOCK_BOOTTIME) - time.monotonic()
+    before = slept()
+    subprocess.run(["loginctl", "suspend"])
+    end = time.monotonic() + 5
+    while time.monotonic() < end:
+        if slept() - before > 1:
+            return True
+        time.sleep(0.2)
+    print("pa2q-keys: suspend refused, dimming instead", flush=True)
+    screen_toggle()
+    return False
+
+
+def main():
+    kb = make_keyboard()
+    fds = {}
+    for name in BUTTONS:
+        path = device(name)
+        fd = os.open(path, os.O_RDONLY)
+        fcntl.ioctl(fd, EVIOCGRAB, 1)
+        fds[fd] = "key"
+    touch = os.open(device("sec_touchscreen"), os.O_RDONLY)
+    fds[touch] = "touch"
+
+    down, last_press = set(), {}
+    repeat_key, next_repeat = None, 0.0
+    power_at, power_used, single_at, ignore_until = None, False, None, 0.0
+    slots, slot, touch_at, peak, tap_at = set(), 0, None, 0, None
+
+    while True:
+        now = time.monotonic()
+        due = [t for t in (next_repeat if repeat_key else None,
+                           power_at + POWER_LONG_S if power_at and not power_used else None,
+                           single_at + POWER_DOUBLE_S if single_at else None,
+                           tap_at + TAP_DOUBLE_S if tap_at else None) if t]
+        ready = select.select(list(fds), [], [], max(0.0, min(due) - now) if due else None)[0]
+        now = time.monotonic()
+
+        if repeat_key and now >= next_repeat:
+            (brightness if KEY_POWER in down else volume)(repeat_key)
+            next_repeat = now + REPEAT_S
+        if power_at and not power_used and now - power_at >= POWER_LONG_S:
+            power_used = True
+            steam("steam://longpowerpress")
+        if single_at and now - single_at >= POWER_DOUBLE_S:
+            single_at = None
+            if suspend():
+                ignore_until = time.monotonic() + WAKE_IGNORE_S
+        if tap_at and now - tap_at >= TAP_DOUBLE_S:
+            tap_at = None
+            press(kb, KEY_LEFTSHIFT, KEY_TAB)
+
+        for fd in ready:
+            _, _, typ, code, val = EVENT.unpack(os.read(fd, EVENT.size))
+            if fds[fd] == "touch":
+                if typ == EV_ABS and code == ABS_MT_SLOT:
+                    slot = val
+                elif typ == EV_ABS and code == ABS_MT_TRACKING_ID:
+                    (slots.discard if val < 0 else slots.add)(slot)
+                elif typ == EV_SYN:
+                    if slots and touch_at is None:
+                        touch_at, peak = now, 0
+                    peak = max(peak, len(slots))
+                    if not slots and touch_at is not None:
+                        quick = now - touch_at <= TAP_MAX_S
+                        if quick and peak == 3:
+                            if tap_at:
+                                tap_at = None
+                                press(kb, KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_TAB)
+                            else:
+                                tap_at = now
+                        elif quick and peak >= 4:
+                            steam("steam://open/keyboard")
+                        touch_at = None
+                continue
+            if typ != EV_KEY or val == 2:      # our own repeat, not the kernel's
+                continue
+            if val == 1:
+                if now - last_press.get(code, 0.0) < DEBOUNCE_S:
+                    continue
+                last_press[code] = now
+                down.add(code)
+                if code == KEY_POWER:
+                    if now < ignore_until:
+                        power_at = None
+                    elif single_at:            # second press
+                        single_at, power_at = None, None
+                        torch()
+                    else:
+                        power_at, power_used = now, False
+                elif KEY_POWER in down:
+                    power_used = True          # chord: not a power press any more
+                    brightness(code)
+                    repeat_key, next_repeat = code, now + REPEAT_DELAY_S
+                elif {KEY_VOLUMEUP, KEY_VOLUMEDOWN} <= down:
+                    repeat_key = None
+                    press(kb, KEY_F12)
+                else:
+                    volume(code)
+                    repeat_key, next_repeat = code, now + REPEAT_DELAY_S
+            elif code in down:
+                down.discard(code)
+                if code == repeat_key:
+                    repeat_key = None
+                if code == KEY_POWER and power_at:
+                    if not power_used:
+                        single_at = now
+                    power_at = None
+
+
+if __name__ == "__main__":
+    main()

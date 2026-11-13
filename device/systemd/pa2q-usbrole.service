@@ -1,0 +1,10 @@
+[Unit]
+Description=Mirror the Type-C data role into the dwc3 role switch
+After=systemd-udev-settle.service
+
+[Service]
+ExecStart=/usr/local/bin/pmos-usbrole-watch
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

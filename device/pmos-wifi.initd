@@ -1,0 +1,38 @@
+#!/sbin/openrc-run
+# Create wlan0 at boot.
+#
+# Nothing in the stock rootfs does this: the interface only exists after the
+# vendor erofs is mounted, the EFS MAC is written to macloader and the modem is
+# up for DMS. vendor-up.sh wifi does all of it. NetworkManager then autoconnects
+# on its own, so this only has to run first.
+#
+# The modem takes ~13s to offer DMS, so this finishes in the background and NM
+# picks wlan0 up when it appears. Only the modem's firmware load is waited for:
+# firmware_class.path points away from /lib/firmware until then, and the GPU
+# firmware must not be requested in that window.
+description="Bring up wlan0 (vendor config, EFS MAC, qca_cld3 host driver)"
+
+depend() {
+	need localmount
+	after udev
+	before networkmanager wpa_supplicant
+}
+
+start() {
+	ebegin "Bringing up wlan0"
+	if [ -e /sys/class/net/wlan0 ]; then
+		eend 0 "already up"
+		return 0
+	fi
+	# A Wi-Fi failure must not hold up the rest of the boot: USB networking
+	# is the fallback path in and it comes up regardless.
+	(
+		/usr/local/bin/vendor-up.sh wifi
+		touch /run/pmos-wifi-done
+	) >/var/log/wifi-up.log 2>&1 &
+	i=0
+	while [ $i -lt 100 ] && [ ! -e /run/pmos-modem-loaded ] && [ ! -e /run/pmos-wifi-done ]; do
+		sleep 0.2; i=$((i + 1))
+	done
+	eend 0 "finishing in background - see /var/log/wifi-up.log"
+}

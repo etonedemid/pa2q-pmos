@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Two-button session chooser: "SteamOS" (gamescope gaming mode) or "Plasma".
+# Session chooser: "SteamOS" (gamescope gaming mode) or "Plasma".
 # Run by pa2q-session before starting a session; prints the choice
 # ("gamescope" or "plasma") on stdout.
 #
@@ -147,8 +147,8 @@ LOGOS = (asset("pa2q-greeter-steam.png"), asset("pa2q-greeter-plasma.png"))  # l
 
 
 def layout(w, h):
-    """Logo squares in landscape coordinates (w > h): Steam left, Plasma right."""
-    size = h * 0.42
+    """Logo squares in landscape coordinates (w > h): Steam, Plasma."""
+    size = h * 0.36
     cy = h * 0.5
     return [(w * cx - size / 2, cy - size / 2, w * cx + size / 2, cy + size / 2) for cx in (0.30, 0.70)]
 
@@ -217,7 +217,7 @@ def open_inputs():
 def choose(first):
     disp = Display()
     W, H = disp.height, disp.width          # portrait panel, landscape UI
-    sel = 0 if first != "plasma" else 1
+    sel = next((i for i, c in enumerate(CHOICES) if c[0] == first), 0)
 
     def draw():
         # The panel scans out portrait; rotate the landscape UI like Plasma's
@@ -226,7 +226,7 @@ def choose(first):
 
     def move(step):
         nonlocal sel
-        sel = (sel + step) % 2
+        sel = (sel + step) % len(CHOICES)
         draw()
 
     draw()

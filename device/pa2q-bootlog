@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+# Boot log on the panel, like a PC text console, from the moment msm_drm loads
+# until SDDM takes the display (pa2q-bootlog.service: Conflicts= display-manager).
+# Before msm_drm the kernel's splashcon shows the same thing in the bootloader's
+# splash buffer; same VGA 8x16 font at 2x, same colours, so the hand-over is
+# barely visible. Text, like Arch on a PC: systemd's own status lines ("[  OK  ] Started ..."), rebuilt from PID 1's journal entries
+# because its console output goes to /dev/console, which is ttynull here.
+# Landscape, the way the greeter and Plasma are turned.
+import gzip
+import importlib.machinery
+import json
+import os
+import select
+import subprocess
+import sys
+import time
+
+from PIL import Image
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+greeter = importlib.machinery.SourceFileLoader(
+    "greeter", os.path.join(HERE, "pa2q-greeter")).load_module()
+
+FONT = "/usr/share/kbd/consolefonts/default8x16.psfu.gz"
+SCALE, MARGIN = 3, 8
+CW, CH = 8 * SCALE, 16 * SCALE
+BG = (0, 0, 0)
+TEXT, WARN, ERR = (170, 170, 170), (255, 255, 85), (255, 85, 85)
+OK = (85, 255, 85)
+FRAME_S = 0.1
+
+
+def load_font():
+    """PSF1/PSF2 -> 256 glyph bitmaps (mode "1", already scaled)."""
+    d = gzip.open(FONT).read()
+    if d[:2] == b"\x36\x04":                      # PSF1
+        h, off, n = d[3], 4, 256
+    else:                                         # PSF2
+        off, n, h = (int.from_bytes(d[i:i + 4], "little") for i in (8, 16, 24))
+    glyphs = []
+    for i in range(min(n, 256)):
+        g = Image.frombytes("1", (8, h), d[off + i * h: off + (i + 1) * h])
+        glyphs.append(g.resize((CW, CH)))
+    return glyphs
+
+
+# systemd's console status: message start -> tag (None: no tag, just indent).
+STATUS = (("Failed", ("FAILED", ERR)), ("Dependency failed", ("DEPEND", WARN)),
+          ("Timed out", (" TIME ", ERR)),
+          ("Starting ", None), ("Stopping ", None), ("Mounting ", None),
+          ("Unmounting ", None), ("Activating ", None), ("Deactivating ", None),
+          ("Started ", ("  OK  ", OK)), ("Finished ", ("  OK  ", OK)),
+          ("Reached target ", ("  OK  ", OK)), ("Mounted ", ("  OK  ", OK)),
+          ("Listening on ", ("  OK  ", OK)), ("Created slice ", ("  OK  ", OK)),
+          ("Activated swap ", ("  OK  ", OK)), ("Set up automount ", ("  OK  ", OK)),
+          ("Stopped ", ("  OK  ", OK)), ("Unmounted ", ("  OK  ", OK)),
+          ("Closed ", ("  OK  ", OK)), ("Removed slice ", ("  OK  ", OK)))
+
+
+def format_entry(e):
+    """Journal entry -> list of segments [(text, colour)], or None to skip."""
+    msg = e.get("MESSAGE", "")
+    if isinstance(msg, list):                     # binary message
+        msg = bytes(msg).decode("utf-8", "replace")
+    # Only PID 1: the kernel log on this vendor kernel is mostly driver spam
+    # (splashcon already showed it until systemd started).
+    if e.get("_PID") != "1":
+        return None
+    for start, tag in STATUS:
+        if msg.startswith(start):
+            if tag is None:
+                return [("         " + msg, TEXT)]
+            return [("[", TEXT), tag, ("] " + msg, TEXT)]
+    return None
+
+
+def wait_card(path="/dev/dri/card0", timeout=60):
+    end = time.monotonic() + timeout
+    while not os.path.exists(path):
+        if time.monotonic() > end:
+            sys.exit("no " + path)
+        time.sleep(0.1)
+
+
+def main():
+    glyphs = load_font()
+    wait_card()
+    disp = None
+    for _ in range(50):         # msm_drm may still be binding when card0 appears
+        try:
+            disp = greeter.Display()
+            break
+        except (OSError, SystemExit):
+            time.sleep(0.2)
+    if disp is None:
+        sys.exit("display not ready")
+    W, H = disp.height, disp.width        # portrait panel, landscape text
+    cols = (W - 2 * MARGIN) // CW
+    rows = (H - 2 * MARGIN) // CH
+    lines = []                  # per screen row: tuple of (char, colour), newest last
+    cache = {}
+    inks = {}
+
+    def add(segments):
+        cells = tuple((c if 32 <= ord(c) < 127 else "?", col)
+                      for text, col in segments for c in text)
+        for i in range(0, max(len(cells), 1), cols):
+            lines.append(cells[i:i + cols])
+        del lines[:-rows]
+
+    def row_image(cells):
+        img = cache.get(cells)
+        if img is None:
+            img = Image.new("RGB", (cols * CW, CH), BG)
+            for i, (c, col) in enumerate(cells):
+                ink = inks.setdefault(col, Image.new("RGB", (CW, CH), col))
+                img.paste(ink, (i * CW, 0), glyphs[ord(c)])
+            cache[cells] = img
+        return img
+
+    def draw():
+        frame = Image.new("RGB", (W, H), BG)
+        for r, cells in enumerate(lines):
+            frame.paste(row_image(cells), (MARGIN, MARGIN + r * CH))
+        disp.show(frame.rotate(90, expand=True))
+        if len(cache) > 4 * rows:
+            cache.clear()
+
+    j = subprocess.Popen(["journalctl", "-b", "-f", "-p", "info", "-o", "json",
+                          "-n", "3000", "--output-fields",
+                          "PRIORITY,MESSAGE,_PID,_TRANSPORT"],
+                         stdout=subprocess.PIPE, text=True)
+    dirty, last = True, 0.0
+    while True:
+        wait = max(0.0, last + FRAME_S - time.monotonic()) if dirty else None
+        if select.select([j.stdout], [], [], wait)[0]:
+            line = j.stdout.readline()
+            if not line:
+                break
+            segs = format_entry(json.loads(line))
+            if segs:
+                add([(t.replace("\n", " "), c) for t, c in segs])
+                dirty = True
+        if dirty and time.monotonic() >= last + FRAME_S:
+            draw()
+            dirty, last = False, time.monotonic()
+    draw()                      # journalctl gone: show what is left
+
+
+if __name__ == "__main__":
+    main()

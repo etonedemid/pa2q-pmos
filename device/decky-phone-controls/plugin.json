@@ -1,0 +1,6 @@
+{
+  "name": "Phone Controls",
+  "author": "pa2q",
+  "flags": [],
+  "publish": { "tags": ["root"], "description": "Clock presets per game and Reboot to Android.", "image": "" }
+}

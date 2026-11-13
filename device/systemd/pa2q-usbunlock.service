@@ -1,0 +1,10 @@
+[Unit]
+Description=Report unlocked to Samsung's usb_notify layer
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'F=/sys/class/usb_notify/usb_control/usb_sl; i=0; while [ ! -e $F ] && [ $i -lt 30 ]; do sleep 1; i=$((i+1)); done; echo SUNNY_WORK_MODE > $F'
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,25 @@
+#!/bin/sh
+# pa2q-touch-rotate on|off: rotate sec_touchscreen to match gamescope's landscape
+# (--force-composition-rotation turns the picture but leaves touch in panel space).
+# On a udev rule in /run, so only the gaming session gets it; kwin maps touch itself.
+# pa2q-touch-rotate dock|undock: turn the touchscreen off/on (docked to a TV).
+R=/run/udev/rules.d/90-pa2q-touch.rules
+inhibit() {
+	for d in /sys/class/input/input*; do
+		[ "$(cat $d/name)" = sec_touchscreen ] && echo $1 > $d/inhibited
+	done
+	exit 0
+}
+case "${1:-}" in
+dock) inhibit 1 ;;
+undock) inhibit 0 ;;
+on)
+	mkdir -p /run/udev/rules.d
+	echo 'ACTION=="add|change", KERNEL=="event*", ATTRS{name}=="sec_touchscreen", ENV{LIBINPUT_CALIBRATION_MATRIX}="0 -1 1 1 0 0"' > "$R"
+	;;
+off) rm -f "$R"; (inhibit 0) ;;
+*) exit 2 ;;
+esac
+udevadm control --reload
+udevadm trigger --action=change --subsystem-match=input --sysname-match="event*"
+udevadm settle --timeout=3

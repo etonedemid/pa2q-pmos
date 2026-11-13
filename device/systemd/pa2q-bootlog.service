@@ -1,0 +1,10 @@
+[Unit]
+Description=Boot log on the panel until the display manager
+DefaultDependencies=no
+After=systemd-journald.service
+
+[Service]
+ExecStart=/usr/local/bin/pa2q-bootlog
+
+[Install]
+WantedBy=sysinit.target

@@ -1,0 +1,18 @@
+#!/bin/busybox sh
+# Test-boot Arch from /arch on the pmOS root, once. Installed as pmOS's
+# /sbin/init (the initramfs switch_roots into it). With /arch-once present it
+# deletes the flag first, so a hung Arch boot falls back to pmOS on the next
+# (forced) restart. Without the flag it is plain pmOS (busybox init).
+if [ -e /arch-once ] && [ -x /arch/usr/lib/systemd/systemd ]; then
+	rm -f /arch-once; sync
+	mount --bind /arch /arch
+	# Share what is too big to copy; Arch will own these after pmOS is gone.
+	mount --rbind /home /arch/home
+	mkdir -p /arch/opt/adroot && mount --rbind /opt/adroot /arch/opt/adroot
+	for m in dev proc sys run; do mount --move /$m /arch/$m 2>/dev/null; done
+	cd /arch
+	mkdir -p oldroot
+	pivot_root . oldroot
+	exec chroot . /usr/lib/systemd/systemd
+fi
+exec /bin/busybox init "$@"

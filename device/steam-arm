@@ -1,0 +1,32 @@
+#!/bin/sh
+# Steam ARM, native on Arch (glibc; it used to need a Debian distrobox on musl
+# pmOS). The client launcher itself is the Steam ARM project's steam-arm,
+# installed as /usr/local/lib/steam-arm-client; this sets the phone's GPU env.
+#
+# GL (Steam UI, GL games) via zink on the KGSL Turnip. zink only takes the
+# Vulkan device whose DRM node matches, and KGSL has none: the Turnip build
+# reports these (turnip-kgsl-report-display-drm.patch). Without them zink finds
+# no GPU, falls back to llvmpipe and Steam's browser UI crashes in a loop.
+export VK_DRIVER_FILES=/etc/vulkan/icd.d/freedreno_kgsl_drm_icd.json
+export VK_ICD_FILENAMES=$VK_DRIVER_FILES
+export TU_KGSL_DRM_RENDER=/dev/dri/renderD128 TU_KGSL_DRM_PRIMARY=/dev/dri/card0
+# TU_DEBUG=nocb,sysmem from the gamescope session is for gamescope's own
+# drawing (chopped Steam UI text). Sysmem rendering skips the GPU's tile memory:
+# glmark2 through zink scored 2439 with it, 3090 without. Games and the client
+# go without; STEAM_TU_DEBUG=<flags> puts flags back for both.
+if [ -n "${STEAM_TU_DEBUG:-}" ]; then export TU_DEBUG=$STEAM_TU_DEBUG; else unset TU_DEBUG; fi
+# No MESA_LOADER_DRIVER_OVERRIDE: card0 has no GL driver, so Mesa falls back to
+# zink by itself. Forcing zink made Hotline Miami (32-bit, FEX GL thunks) quit
+# right after creating its context. STEAM_GL_DRIVER=<driver> still forces one.
+[ -n "${STEAM_GL_DRIVER:-}" ] && export MESA_LOADER_DRIVER_OVERRIDE=$STEAM_GL_DRIVER
+# Valve's launch wrapper asks every game for the Steam Frame layers
+# VK_LAYER_VALVE_rpo/fdm_injection unless told not to. They exist nowhere here,
+# so the Vulkan loader refused every instance (VK_ERROR_LAYER_NOT_PRESENT): GL
+# through zink, as FEX's x86 games use it, failed outright.
+export STEAM_LAUNCH_WRAPPER_RPO=0 STEAM_LAUNCH_WRAPPER_FDM=0
+# Wine's gamepad accessibility helper took 15% of a core in every Proton game.
+export PROTON_USE_XALIA=0
+# GTK2 for steamui.so/vgui2_s.so: Arch dropped it, these came from Debian.
+export LD_LIBRARY_PATH=/usr/local/lib/steam-arm-libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+/usr/local/bin/pa2q-decky >/dev/null 2>&1 &
+exec /usr/local/lib/steam-arm-client "$@"
